@@ -1,0 +1,1 @@
+# Class quản lý 1 chiếc xe (ID, tuổi thọ, EMA feature).

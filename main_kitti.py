@@ -1,0 +1,1 @@
+# Khởi tạo hệ thống, lặp qua các KITTI sequences.

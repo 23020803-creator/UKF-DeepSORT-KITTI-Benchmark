@@ -1,0 +1,1 @@
+# Class trích xuất đặc trưng ngoại hình.

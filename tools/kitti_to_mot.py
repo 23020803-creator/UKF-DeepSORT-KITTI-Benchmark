@@ -1,0 +1,1 @@
+# Script chuyển đổi data KITTI gốc sang chuẩn MOT

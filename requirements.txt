@@ -1,0 +1,1 @@
+# Khai báo thư viện (torch, ultralytics, opencv-python, scipy...)

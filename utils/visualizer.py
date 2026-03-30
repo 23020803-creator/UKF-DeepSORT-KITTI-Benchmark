@@ -1,0 +1,1 @@
+# Vẽ Bounding Box, màu sắc, ID lên ảnh.

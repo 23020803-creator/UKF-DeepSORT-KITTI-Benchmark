@@ -1,0 +1,1 @@
+# Class nhận diện xe.

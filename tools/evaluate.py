@@ -1,0 +1,1 @@
+# Script chấm điểm tự động (tính MOTA, IDF1...)

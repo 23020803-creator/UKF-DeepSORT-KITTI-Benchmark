@@ -1,0 +1,1 @@
+# Class quản lý tổng (Ghép nối YOLO, Kalman và Matching).

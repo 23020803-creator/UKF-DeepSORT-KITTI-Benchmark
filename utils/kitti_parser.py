@@ -1,0 +1,1 @@
+# Class đọc ảnh và file det.txt liên tục cho main_kitti.py.

@@ -1,0 +1,1 @@
+# Script chạy YOLO lấy bounding box lưu thành file det.txt
