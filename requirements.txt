@@ -18,3 +18,4 @@ numpy
 # Thư viện học sâu (Bản CPU để tối ưu cho môi trường OpenVINO)
 torch
 torchvision
+

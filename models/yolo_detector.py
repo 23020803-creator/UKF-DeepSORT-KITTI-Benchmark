@@ -108,7 +108,7 @@ class YOLODetector:
         preds = torch.from_numpy(raw_results)
         preds = non_max_suppression(preds, conf_thres=self.conf_thresh, iou_thres=0.45, max_det=300)
         
-        if not len(preds[0]):
+        if len(preds) == 0 or len(preds[0]) == 0:
             return (np.empty((0, 4), dtype=np.float32), 
                     np.empty((0,), dtype=np.float32), 
                     np.empty((0,), dtype=np.int32))
@@ -118,15 +118,17 @@ class YOLODetector:
         temp_pedestrians = []
         temp_vehicles = []
         
-        for *xyxy, conf, cls in preds[0]:
+        for det in preds[0]:
+            x1, y1, x2, y2, conf, cls = det[:6]
             coco_cls_id = int(cls.item())
+            
             if coco_cls_id not in self.coco_to_id:
                 continue
                 
             target_id = self.coco_to_id[coco_cls_id]
-            x1, y1, x2, y2 = [int(v.item()) for v in xyxy]
             
-            # Logic phân loại tạm thời dựa trên ID mới
+            x1, y1, x2, y2 = int(x1.item()), int(y1.item()), int(x2.item()), int(y2.item())
+            
             if target_id == 0: # Person
                 temp_pedestrians.append([x1, y1, x2, y2, conf.item(), target_id])
             else:              # Cyclist (1) hoặc Car (2)
