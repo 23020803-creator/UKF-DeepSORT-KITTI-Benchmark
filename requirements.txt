@@ -1,1 +1,20 @@
 # Khai báo thư viện (torch, ultralytics, opencv-python, scipy...)
+
+# Lõi chính để chạy YOLO11 và các công cụ hỗ trợ
+ultralytics
+
+# Bộ công cụ để chạy mô hình trên phần cứng Intel (CPU/iGPU)
+openvino>=2024.0.0
+
+# Thư viện nén mô hình (Cần thiết để thực hiện lượng tử hóa INT8)
+nncf>=2.9.0
+
+# Xử lý ảnh và video
+opencv-python
+
+# Tính toán ma trận và mảng
+numpy
+
+# Thư viện học sâu (Bản CPU để tối ưu cho môi trường OpenVINO)
+torch
+torchvision
