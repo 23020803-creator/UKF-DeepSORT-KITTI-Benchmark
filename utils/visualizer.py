@@ -12,6 +12,7 @@ class Visualizer:
         
         np.random.seed(42)
         self.colors_palette = np.random.randint(0, 255, size=(1000, 3), dtype=int)
+        self.class_names = {0: "Person", 1: "Cyclist", 2: "Car"}
 
     def _get_color(self, track_id):
         """ Lay màu ngẫu nhiên dựa trên track_id để dễ phân biệt các đối tượng khác nhau. """
@@ -74,7 +75,7 @@ class Visualizer:
     def draw_raw_detections(self, image, detections, frame_idx=0):
         """
         Vẽ các bounding box thô từ detections lên ảnh.
-        Input: detections: mảng (N, 5) [x, y, w, h, conf]
+        Input: detections: mảng (N, 6) [x, y, w, h, conf, class_id]
         """
         draw_image = image.copy()
         h_img, w_img = draw_image.shape[:2]
@@ -82,13 +83,17 @@ class Visualizer:
         cv2.putText(draw_image, f"Frame: {frame_idx:04d}", (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2, cv2.LINE_AA)
 
         for det in detections:
-            x, y, w, h, conf = det[:5]
+            x, y, w, h, conf, class_id = det[:6]
             x1, y1 = int(x), int(y)
             x2, y2 = int(x + w), int(y + h)
 
+            # Dịch ID sang tên (Nếu nhãn rác thì để là 'Obj')
+            class_name = self.class_names.get(int(class_id), "Obj")
+
             # Vẽ bounding box màu xanh dương cho detections thô
             cv2.rectangle(draw_image, (x1, y1), (x2, y2), (128, 128, 128), 2)
-            cv2.putText(draw_image, f"{conf:.2f}", (x1, y1 - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (128, 128, 128), 1, cv2.LINE_AA)
+            label = f"{class_name} {conf:.2f}"
+            cv2.putText(draw_image, label, (x1, y1 - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (128, 128, 128), 1, cv2.LINE_AA)
         return draw_image
     
     def release(self):
@@ -115,7 +120,7 @@ if __name__ == "__main__":
         count = 0
         for frame_idx, img, dets in parser.get_frame():
             count += 1
-            if count > 50:  # Chỉ test với 50 frame đầu tiên
+            if count > 150:  # Chỉ test với 150 frame đầu tiên
                 break
 
             print(f"Đang vẽ Frame {frame_idx}...", end='\r')

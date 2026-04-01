@@ -35,7 +35,7 @@ class KittiParser:
     def get_frame(self):
             """
             Generator yield từng frame ảnh.
-            Output: frame_idx(int), image(H,W,3), detections(N,5) [x, y, w, h, conf]
+            Output: frame_idx(int), image(H,W,3), detections(N,5) [x, y, w, h, conf, class_id]
             """
             for img_name in self.img_files:
                 frame_idx = int(os.path.splitext(img_name)[0])
@@ -50,9 +50,9 @@ class KittiParser:
                 frame_dets = self.raw_detections[mask]
 
                 if len(frame_dets) > 0:
-                    out_dets = frame_dets[:, [2, 3, 4, 5, 6]].astype(np.float32)
+                    out_dets = frame_dets[:, [2, 3, 4, 5, 6, 7]].astype(np.float32)
                 else:
-                    out_dets = np.empty((0, 5), dtype=np.float32)
+                    out_dets = np.empty((0, 6), dtype=np.float32)
 
                 yield frame_idx, image, out_dets
         
