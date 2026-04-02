@@ -21,3 +21,12 @@ torchvision
 
 # Thư viện cho bộ lọc UnscentedKalmanFilter (UKF) để dự đoán quỹ đạo
 filterpy
+
+# Thuật toán Hungarian cho DeepSORT matching
+scipy
+
+# Công cụ tải và tối ưu hóa model Intel (omz_downloader)
+openvino-dev>=2024.0.0
+
+# Thanh tiến độ cho vòng lặp xử lý video
+tqdm
