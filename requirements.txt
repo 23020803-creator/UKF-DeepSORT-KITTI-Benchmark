@@ -19,3 +19,5 @@ numpy
 torch
 torchvision
 
+# Thư viện cho bộ lọc UnscentedKalmanFilter (UKF) để dự đoán quỹ đạo
+filterpy
