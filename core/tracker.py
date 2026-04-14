@@ -19,31 +19,55 @@ class Tracker:
         self.tracks = []
         self.next_id = 1
 
-    def update(self, bboxes, confs, class_ids, features, frame_shape, H_camera=None):
+    def update(self, bboxes, confs, class_ids, features, frame_shape, H_camera=None, frame_idx=0):
         img_h, img_w = frame_shape
         
+        # ====================================================================
+        # BƯỚC 0: CẬP NHẬT QUỸ ĐẠO DỰ ĐOÁN (KALMAN FILTER PREDICT)
+        # ====================================================================
         for trk in self.tracks:
             trk.predict(H_camera)
+            # Lấy tọa độ hộp dự đoán của Tracker (Dùng biến x, y, w, h)
             x, y, w, h = trk.to_tlwh()
             
-            # --- ĐÃ SỬA LẠI LOGIC LỀ ẢNH ---
             cx, cy = x + w / 2.0, y + h / 2.0
             
-            # Điều kiện 1: Tâm xe văng hẳn ra ngoài camera -> Xóa ngay lập tức (không cần chờ)
+            # Điều kiện 1: Tâm xe văng hẳn ra ngoài camera
+            # (Fix: Cho phép xe sống thêm 3 frame ở ngoài lề để chờ Vòng 3 cứu)
             is_center_outside = (cx < 0 or cx > img_w or cy < 0 or cy > img_h)
+            if is_center_outside and trk.time_since_update > 3:
+                trk.state = TrackState.DELETED
             
             # Điều kiện 2: Xe chạm lề (còn trong camera nhưng dễ bị YOLO bắt hụt)
             margin = 15
+            # QUAN TRỌNG: Ở đây sử dụng x, y, w, h (không dùng det_x)
             is_touching_margin = (x < margin or y < margin or x + w > img_w - margin or y + h > img_h - margin)
             
-            if is_center_outside and trk.time_since_update > 0:
-                trk.state = TrackState.DELETED
-            elif is_touching_margin and trk.time_since_update > 5: # Cho phép YOLO miss 5 frame ở lề
+            if is_touching_margin and trk.time_since_update > 5: # Cho phép YOLO miss 5 frame ở lề
                 trk.state = TrackState.DELETED
 
-        valid_dets = [Detection(bboxes[i], confs[i], class_ids[i], features[i] if len(features) > 0 else None) for i in range(len(bboxes))]
+        # ====================================================================
+        # BỘ LỌC CẮT TỈA (EDGE-NOISE PRUNING) - Lọc rác YOLO
+        # ====================================================================
+        valid_dets = []
+        for i in range(len(bboxes)):
+            # Tọa độ gốc của YOLO
+            x_det, y_det, w_det, h_det = bboxes[i]
+            
+            margin_prune = 15
+            is_touching_edge = (x_det <= margin_prune or x_det + w_det >= img_w - margin_prune)
+            
+            # Nếu hộp tọa độ CHẠM LỀ và CHIỀU RỘNG BỊ TEO QUÁ NHỎ (< 45 pixel) -> Cắt bỏ
+            if is_touching_edge and w_det < 60:
+                continue 
+                
+            feature = features[i] if len(features) > 0 else None
+            valid_dets.append(Detection(bboxes[i], confs[i], class_ids[i], feature))
+
         unmatched_trks_idx = [i for i, t in enumerate(self.tracks) if not t.is_deleted()]
         unmatched_dets_idx = list(range(len(valid_dets)))
+        
+        # --- (BÊN DƯỚI LÀ CODE VÒNG 1, VÒNG 2, VÒNG 3 CỦA BẠN GIỮ NGUYÊN) ---
 
         # ====================================================================
         # VÒNG 1: CASCADE REID (Ưu tiên ngoại hình)
@@ -75,9 +99,6 @@ class Tracker:
         # ====================================================================
         # VÒNG 2: IOU MATCHING (Dùng box UKF dự đoán)
         # ====================================================================
-        # ====================================================================
-        # VÒNG 2: IOU MATCHING (Dùng box UKF dự đoán)
-        # ====================================================================
         if len(unmatched_trks_idx) > 0 and len(unmatched_dets_idx) > 0:
             iou_trk_idx = [i for i in unmatched_trks_idx if self.tracks[i].time_since_update <= 2]
             iou_tracks = [self.tracks[i] for i in iou_trk_idx]
@@ -86,14 +107,12 @@ class Tracker:
             if len(iou_tracks) > 0:
                 iou_cost = matching.compute_iou_matrix(iou_tracks, iou_dets, img_w, img_h)
                 
-                # --- THÊM MỚI: CHỐT CHẶN REID ---
                 # Tính trước ma trận ngoại hình để làm lưới lọc
                 feature_cost_v2 = matching.compute_cosine_distance(iou_tracks, [d.feature for d in iou_dets])
 
                 for r, trk in enumerate(iou_tracks):
                     for c, det in enumerate(iou_dets):
-                        # Lưới lọc: Khác Class HOẶC Ngoại hình quá khác biệt (Cos > 0.55) -> Vô hiệu hóa ghép tọa độ!
-                        # Ngưỡng 0.55 lỏng hơn Vòng 1 (0.35) để linh hoạt, nhưng đủ chặt để phân biệt Đen - Đỏ.
+                        # Vòng 2 phải cực kỳ khắt khe: Ngoại hình khác biệt (Cos > 0.55) -> Vô hiệu hóa!
                         if trk.class_id != det.class_id or feature_cost_v2[r, c] > 0.55:
                             iou_cost[r, c] = 1e5
 
@@ -135,21 +154,43 @@ class Tracker:
                     for c, det in enumerate(rec_dets):
                         if trk.class_id != det.class_id: continue
 
+                        # Lấy tọa độ thực tế của hộp YOLO thay vì hộp dự đoán
+                        # ---------------------------------------------------------
+                        # BƯỚC 1: TÍNH TOÁN CÁC THÔNG SỐ KHÔNG GIAN (BẮT BUỘC)
+                        # ---------------------------------------------------------
+                        # 1. Lấy tọa độ và diện tích
                         det_x, det_y, det_w, det_h = det.bbox
+                        proj_area = proj_w * proj_h
                         det_area = det_w * det_h
-
-                        # Tính diện tích đè lên nhau
-                        ix1, iy1 = max(proj_x, det_x), max(proj_y, det_y)
-                        ix2, iy2 = min(proj_x+proj_w, det_x+det_w), min(proj_y+proj_h, det_y+det_h)
-                        inter = max(0, ix2 - ix1) * max(0, iy2 - iy1)
-
-                        # Tính IoM (Intersection over Minimum)
+                        
+                        # 2. Tính toán IoM (Intersection over Minimum)
+                        inter_x1 = max(proj_x, det_x)
+                        inter_y1 = max(proj_y, det_y)
+                        inter_x2 = min(proj_x + proj_w, det_x + det_w)
+                        inter_y2 = min(proj_y + proj_h, det_y + det_h)
+                        
+                        inter = max(0, inter_x2 - inter_x1) * max(0, inter_y2 - inter_y1)
                         iom = inter / max(min(proj_area, det_area), 1e-6)
 
-                        # ĐIỀU KIỆN KÉP: Tọa độ lọt vào nhau > 60% VÀ Ngoại hình giống nhau
-                        # Ngưỡng cosine 0.6 nới lỏng chút ít cho góc chụp thay đổi
-                        if iom > 0.6 and feature_cost_v3[r, c] <= 0.6: 
-                            bypass_cost[r, c] = 1.0 - iom
+                        # --- LƯỚI LỌC KHÔNG GIAN BÙ TRỪ NGOẠI HÌNH ---
+                        is_near_edge = (det_x <= 30 or det_y <= 30 or 
+                                        det_x + det_w >= img_w - 30 or 
+                                        det_y + det_h >= img_h - 30)
+
+                        # [RADAR DEBUG]: Dòng này sẽ giúp bạn hiểu bản chất mà không phải đoán mò
+                        if trk.track_id in [17, 116]:
+                            print(f"[DEBUG ID {trk.track_id:03d}] IoM: {iom:.2f} | Cosine: {feature_cost_v3[r, c]:.2f} | is_Edge: {is_near_edge}")
+
+                        # --- ÁP DỤNG LUẬT GÁN ---
+                        if not is_near_edge:
+                            # Ở giữa ảnh: Chấp nhận IoM khá (>0.6) NHƯNG ReID phải cực kỳ chuẩn (<=0.6)
+                            if iom > 0.60 and feature_cost_v3[r, c] <= 0.60: 
+                                bypass_cost[r, c] = 1.0 - iom
+                        else:
+                            # Ở lề ảnh: ReID bị hỏng nên nới lỏng (<=0.75), 
+                            # NHƯNG ÉP IoM phải cực kỳ khít (>0.80) để chống xe ID 17 nhận vơ Xe Đỏ!
+                            if iom > 0.80 and feature_cost_v3[r, c] <= 0.75: 
+                                bypass_cost[r, c] = 1.0 - iom
 
                 matches_v3, un_t_v3, un_d_v3 = matching.linear_assignment(bypass_cost, rec_tracks, rec_dets, 1.0)
 
@@ -165,7 +206,7 @@ class Tracker:
                 unmatched_dets_idx = [unmatched_dets_idx[i] for i in un_d_v3]
 
         # ====================================================================
-        # QUẢN LÝ VÒNG ĐỜI
+        # QUẢN LÝ VÒNG ĐỜI (Đã vá lỗi Logic sát lề)
         # ====================================================================
         for det_idx in unmatched_dets_idx:
             det = valid_dets[det_idx]
@@ -179,14 +220,18 @@ class Tracker:
             x, y, w, h = trk.to_tlwh()
             margin = 15
             
-            # CHỈ XÓA khi xe thực sự unmatch (time_since_update > 0) 
-            # VÀ nó đang nằm sát lề (có nguy cơ đi ra khỏi camera)
+            # 1. Luôn tăng bộ đếm time_since_update trước
+            trk.mark_missed()
+            
             is_out_of_frame = (x < margin or y < margin or x + w > img_w - margin or y + h > img_h - margin)
             
-            if is_out_of_frame:
+            # 2. Sửa lỗi cốt lõi: Chỉ giết ID nếu nó sát lề VÀ đã mất dấu quá 5 frame
+            # (Đồng bộ với logic ở đầu hàm update)
+            if is_out_of_frame and trk.time_since_update > 5:
                 trk.state = TrackState.DELETED
-            else:
-                trk.mark_missed()
+            # 3. Hoặc nếu xe nằm giữa màn hình nhưng mất dấu vượt quá max_age
+            elif trk.is_deleted(): 
+                pass
 
         self.tracks = [t for t in self.tracks if not t.is_deleted()]
 

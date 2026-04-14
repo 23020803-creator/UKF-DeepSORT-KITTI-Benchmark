@@ -58,16 +58,33 @@ def main():
                     valid_confs.append(confs[i])
                     valid_class_ids.append(class_ids[i])
 
-        # Bước 3: Trích xuất đặc trưng ReID
+        # Bước 3: Trích xuất đặc trưng ReID (Đã phân loại Class)
         t_reid_start = time.time()
-        features = np.zeros((len(valid_bboxes), 512), dtype=np.float32)
+        features = []
         
-        # (Bạn có thể phân loại gọi extractor vehicle/person tại đây)
         if len(valid_bboxes) > 0:
-            features = reid_vehicle.extract(image, np.array(valid_bboxes))
+            for i, bbox in enumerate(valid_bboxes):
+                cls_id = valid_class_ids[i]
+                
+                # Trong YOLO (COCO dataset), class 0 là 'person'
+                if cls_id == 0:
+                    # Trích xuất đặc trưng người
+                    feat = reid_person.extract(image, np.array([bbox]))[0]
+                    # Đệm thêm zero để đồng nhất kích thước vector 512 của Tracker
+                    if feat.shape[0] < 512:
+                        feat = np.pad(feat, (0, 512 - feat.shape[0]), 'constant')
+                else:
+                    # Trích xuất đặc trưng xe cộ
+                    feat = reid_vehicle.extract(image, np.array([bbox]))[0]
+                    
+                features.append(feat)
+                
+            features = np.array(features, dtype=np.float32)
+        else:
+            features = np.zeros((0, 512), dtype=np.float32)
 
         # Bước 4: Đẩy hết dữ liệu cho Tracker xử lý (Tracker tự làm 3 vòng match)
-        tracker.update(valid_bboxes, valid_confs, valid_class_ids, features, frame_shape=(img_h, img_w), H_camera=H_camera)
+        tracker.update(valid_bboxes, valid_confs, valid_class_ids, features, frame_shape=(img_h, img_w), H_camera=H_camera, frame_idx=frame_idx)
         
         time_reid_total = (time.time() - t_reid_start) * 1000
         fps = 1.0 / (time.time() - frame_start_time)
