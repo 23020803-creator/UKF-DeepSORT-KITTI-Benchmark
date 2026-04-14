@@ -17,10 +17,10 @@ class Track:
 
         self.last_bbox = np.asarray(bbox, dtype=np.float32).copy()
 
-        # SỬA: Dùng list để thiết lập "Mỏ neo", cấm dùng deque
-        self.features = [] 
+        self.smooth_feature = None
         if feature is not None:
-            self.features.append(feature)
+            self.smooth_feature = feature.copy()
+        self.alpha = 0.1
 
         self.hits = 1 
         self.age = 1 
@@ -38,35 +38,31 @@ class Track:
 
     def update(self, detection_bbox, detection_feature, img_w, img_h):
         bbox_ukf = self._tlwh_to_xyah(detection_bbox)
-
         self.last_bbox = np.asarray(detection_bbox, dtype=np.float32).copy()
         
-        # --- SỬA: ÉP UKF NHẢY CÓC KÍCH THƯỚC (CHỐNG LỰC Ỳ) ---
         current_w = self.ukf.mean[2] * self.ukf.mean[3]
         new_w = detection_bbox[2]
         
-        # Nếu xe đột ngột nở to > 1.5 lần hoặc co lại < 0.6 lần,
-        # Reset toàn bộ trạng thái để UKF quên đi quá khứ sai lệch!
-        if new_w > 1.5 * current_w or new_w < 0.6 * current_w:
-            # 1. Ghi đè toàn bộ: Tâm (cx, cy) và Kích thước (a, h)
-            self.ukf.mean[:4] = bbox_ukf[:4]
+        # Đổi thành > 1. Xe track bình thường sau khi predict() sẽ có giá trị là 1.
+        # > 1 nghĩa là xe đã bị mất dấu ít nhất 1 frame (ví dụ: lấp sau cây).
+        if new_w > 1.5 * current_w or new_w < 0.6 * current_w or self.time_since_update > 1:
             
-            # 2. Reset vận tốc (vx, vy, omega, vh) về 0.
-            self.ukf.mean[4:] = 0.0
+            # 1. REBOOT TOÀN BỘ BỘ LỌC UKF
+            # Dùng initiate() để thiết lập lại tâm, kích thước và ma trận hiệp phương sai P từ đầu.
+            # Thao tác này chặn hoàn toàn lỗi Overshoot của hàm update().
+            self.ukf.initiate(bbox_ukf)
             
-            # 3. Phá vỡ Lực ỳ: Bơm lại độ bất định (Nhiễu) vào Ma trận Hiệp phương sai P
-            # Lưu ý: Phải gọi self.ukf.ukf.P vì TrackUKF là class bọc ngoài
-            h = max(bbox_ukf[3], 1.0)
-            self.ukf.ukf.P[0, 0] = self.ukf.ukf.P[1, 1] = self.ukf.ukf.P[3, 3] = (0.05 * h) ** 2
-            self.ukf.ukf.P[2, 2] = 1e-4
-            self.ukf.ukf.P[4, 4] = self.ukf.ukf.P[5, 5] = self.ukf.ukf.P[7, 7] = (0.01 * h) ** 2
-            self.ukf.ukf.P[6, 6] = 1e-5
-            
-            # Chống lỗi toán học ma trận
-            self.ukf.ukf.P = self.ukf._enforce_spd(self.ukf.ukf.P)
-            
-        self.ukf.update(bbox_ukf)
+            # 2. TẨY NÃO ĐẶC TRƯNG REID
+            if detection_feature is not None:
+                self.smooth_feature = detection_feature.copy()
+                
+        else:
+            # 3. CHỈ gọi update khi xe không bị khuất và kích thước bình thường
+            self.ukf.update(bbox_ukf)
 
+        # ==========================================
+        # Cập nhật Feature EMA (Lọc thông thấp)
+        # ==========================================
         if detection_feature is not None:
             x, y, w, h = detection_bbox
             margin = 15
@@ -77,11 +73,11 @@ class Track:
                 if norm > 1e-6:
                     detection_feature /= norm
                 
-                if len(self.features) < 50:
-                    self.features.append(detection_feature)
+                if not hasattr(self, 'smooth_feature') or self.smooth_feature is None:
+                    self.smooth_feature = detection_feature
                 else:
-                    self.features.pop(0) # Xóa ảnh cũ nhất (cái đuôi xe)
-                    self.features.append(detection_feature) # Thêm ảnh mới nhất (toàn bộ xe)
+                    self.smooth_feature = 0.1 * detection_feature + 0.9 * self.smooth_feature
+                    self.smooth_feature /= max(np.linalg.norm(self.smooth_feature), 1e-6)
 
         self.hits += 1
         self.time_since_update = 0
@@ -98,7 +94,18 @@ class Track:
     def is_confirmed(self): return self.state == TrackState.CONFIRMED
     def is_deleted(self): return self.state == TrackState.DELETED
     
-    def get_features(self): return np.array(self.features)
+    # TÌM VÀ XÓA DÒNG NÀY:
+    # def get_features(self): return np.array(self.features)
+
+    # THAY THẾ BẰNG ĐOẠN SAU:
+    def get_features(self):
+        """
+        Gói feature duy nhất (smooth_feature) vào mảng 2D: shape (1, 512).
+        Điều này giúp tương thích ngược với hàm cdist trong matching.py
+        """
+        if hasattr(self, 'smooth_feature') and self.smooth_feature is not None:
+            return np.array([self.smooth_feature])
+        return np.array([])
 
     def to_tlwh(self):
         ret = self.ukf.mean[:4].copy()

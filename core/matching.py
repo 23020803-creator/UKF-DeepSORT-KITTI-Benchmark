@@ -4,23 +4,23 @@ from scipy.spatial.distance import cdist
 from scipy.optimize import linear_sum_assignment
 
 def compute_cosine_distance(tracks, features_new):
-    """Tính khoảng cách Cosine từ Det mới tới TOÀN BỘ góc nhìn trong Ngân hàng đặc trưng của Track"""
+    """Tính khoảng cách Cosine từ Det mới tới Track (Đã tối ưu cho EMA)"""
     if len(tracks) == 0 or len(features_new) == 0:
         return np.empty((len(tracks), len(features_new)))
     
-    cost_matrix = np.zeros((len(tracks), len(features_new)))
-    for i, track in enumerate(tracks):
-        gallery = track.get_features() # Ma trận các góc nhìn đã lưu
-        if len(gallery) == 0:
-            cost_matrix[i, :] = 1.0
-            continue
-            
-        # So sánh N det mới với M góc nhìn trong gallery
-        distances = cdist(gallery, features_new, metric='cosine')
+    # 1. Rút trích tất cả smooth_feature của các Track hiện tại thành ma trận (M, 512)
+    track_features = []
+    for track in tracks:
+        # Lấy feature, nếu bị None (do khởi tạo chưa có) thì dùng vector 0
+        feat = track.smooth_feature if (hasattr(track, 'smooth_feature') and track.smooth_feature is not None) else np.zeros(512)
+        track_features.append(feat)
         
-        # Lấy khoảng cách NHỎ NHẤT (giống nhất với 1 góc nhìn bất kỳ từng thấy)
-        cost_matrix[i, :] = np.min(distances, axis=0)
-        
+    track_features = np.array(track_features)
+    
+    # 2. Tính toán Vectorized cực nhanh cho toàn bộ hệ thống
+    # cdist(M x 512, N x 512) -> Trả ra ma trận (M, N)
+    cost_matrix = cdist(track_features, features_new, metric='cosine')
+    
     return cost_matrix
 
 def compute_iou_matrix(tracks, detections, img_w, img_h):
