@@ -1,127 +1,114 @@
 import numpy as np
+from core.ukf import TrackUKF  
 
 class TrackState:
-    """
-    Định nghĩa 3 trạng thái của một đối tượng đang được theo dõi:
-    - TENTATIVE: Vừa xuất hiện, đang chờ theo dõi thêm để xác nhận không phải nhiễu.
-    - CONFIRMED: Đã bám track ổn định, được phép hiển thị lên màn hình.
-    - DELETED: Bị mất dấu quá lâu, chuẩn bị xóa khỏi bộ nhớ.
-    """
     TENTATIVE = 1
     CONFIRMED = 2
     DELETED = 3
 
-
 class Track:
-    """
-    Hồ sơ của một đối tượng đang được theo dõi.
-    Nơi này chỉ lưu trữ dữ liệu, không chứa logic Deep Learning.
-    """
-    def __init__(self, mean, covariance, track_id, class_id, feature):
-        # Định danh
+    def __init__(self, fps, track_id, class_id, bbox, feature):
         self.track_id = track_id
         self.class_id = class_id
 
-        # Trạng thái động học
-        self.mean = mean    # Vector [cx, cy, a, h, vx, vy, va, vh]
-        self.covariance = covariance # Ma trận hiệp phương sai 8x8
+        self.ukf = TrackUKF(fps=fps)
+        bbox_ukf = self._tlwh_to_xyah(bbox)
+        self.ukf.initiate(bbox_ukf)
 
-        # Trạng thái ngoại hình
-        self.feature = feature  # Vector đặc trưng ngoại hình 512 chiều
-        self.alpha = 0.9  # Hệ số EMA: 90% trọng số cũ, 10% trọng số mới
+        self.last_bbox = np.asarray(bbox, dtype=np.float32).copy()
 
-        # Quản lý vòng đời
-        self.hits = 1 # Số frame đã match thành công
-        self.age = 1 # Số frame từ khi track được tạo
-        self.time_since_update = 0 # Số frame bị mất dấu liên tiếp
-        self.state = TrackState.TENTATIVE # Trạng thái ban đầu là TENTATIVE
+        # SỬA: Dùng list để thiết lập "Mỏ neo", cấm dùng deque
+        self.features = [] 
+        if feature is not None:
+            self.features.append(feature)
 
-        # Ngưỡng cấu hình (Sẽ được tracker.py tự động map sang khi tạo mới)
-        self._n_init = 3 # Số frame cần match để chuyển sang CONFIRMED
-        self._max_age = 30 # Số frame tối đa được phép mất dấu trước khi chuyển sang DELETED
+        self.hits = 1 
+        self.age = 1 
+        self.time_since_update = 0 
+        self.state = TrackState.TENTATIVE 
+        self._n_init = 3 
+        self._max_age = 30 
 
-    def predict(self, kf):
-        """
-        Dự đoán vị trí tiếp theo của track dựa trên Bộ lọc UKF.
-        Liên tục cập nhật mỗi frame, ngay cả khi không có detections nào match được.
-        """
-        # SỬA: Gọi đúng tên biến kf (Kalman Filter) được truyền vào từ tracker.py
-        self.mean, self.covariance = kf.predict(self.mean, self.covariance)
-
-        # Tăng tuổi thọ và thời gian mất dấu
+    def predict(self, H_camera=None):
+        self.ukf.predict(H_camera)
+        if self.time_since_update > 0:
+            self.ukf.mean[4:] *= 0.95 
         self.age += 1
         self.time_since_update += 1
 
-    def update(self, kf, detection_bbox, detection_feature):
-        """
-        Cập nhật track khi có một detection match thành công từ YOLO.
-        """
-        # Đổi bounding box sang định dạng [cx, cy, a, h] để phù hợp với toán học của UKF
+    def update(self, detection_bbox, detection_feature, img_w, img_h):
         bbox_ukf = self._tlwh_to_xyah(detection_bbox)
 
-        # Cập nhật thông số vị trí bằng UKF (SỬA: gọi đúng biến kf)
-        self.mean, self.covariance = kf.update(self.mean, self.covariance, bbox_ukf)
+        self.last_bbox = np.asarray(detection_bbox, dtype=np.float32).copy()
+        
+        # --- SỬA: ÉP UKF NHẢY CÓC KÍCH THƯỚC (CHỐNG LỰC Ỳ) ---
+        current_w = self.ukf.mean[2] * self.ukf.mean[3]
+        new_w = detection_bbox[2]
+        
+        # Nếu xe đột ngột nở to > 1.5 lần hoặc co lại < 0.6 lần,
+        # Reset toàn bộ trạng thái để UKF quên đi quá khứ sai lệch!
+        if new_w > 1.5 * current_w or new_w < 0.6 * current_w:
+            # 1. Ghi đè toàn bộ: Tâm (cx, cy) và Kích thước (a, h)
+            self.ukf.mean[:4] = bbox_ukf[:4]
+            
+            # 2. Reset vận tốc (vx, vy, omega, vh) về 0.
+            self.ukf.mean[4:] = 0.0
+            
+            # 3. Phá vỡ Lực ỳ: Bơm lại độ bất định (Nhiễu) vào Ma trận Hiệp phương sai P
+            # Lưu ý: Phải gọi self.ukf.ukf.P vì TrackUKF là class bọc ngoài
+            h = max(bbox_ukf[3], 1.0)
+            self.ukf.ukf.P[0, 0] = self.ukf.ukf.P[1, 1] = self.ukf.ukf.P[3, 3] = (0.05 * h) ** 2
+            self.ukf.ukf.P[2, 2] = 1e-4
+            self.ukf.ukf.P[4, 4] = self.ukf.ukf.P[5, 5] = self.ukf.ukf.P[7, 7] = (0.01 * h) ** 2
+            self.ukf.ukf.P[6, 6] = 1e-5
+            
+            # Chống lỗi toán học ma trận
+            self.ukf.ukf.P = self.ukf._enforce_spd(self.ukf.ukf.P)
+            
+        self.ukf.update(bbox_ukf)
 
-        # Cập nhật đặc trưng ngoại hình bằng EMA (Exponential Moving Average)
-        self.feature = self.alpha * self.feature + (1 - self.alpha) * detection_feature
+        if detection_feature is not None:
+            x, y, w, h = detection_bbox
+            margin = 15
+            is_truncated = (x < margin or y < margin or (x + w) > img_w - margin or (y + h) > img_h - margin)
+            
+            if not is_truncated:
+                norm = np.linalg.norm(detection_feature)
+                if norm > 1e-6:
+                    detection_feature /= norm
+                
+                if len(self.features) < 50:
+                    self.features.append(detection_feature)
+                else:
+                    self.features.pop(0) # Xóa ảnh cũ nhất (cái đuôi xe)
+                    self.features.append(detection_feature) # Thêm ảnh mới nhất (toàn bộ xe)
 
-        # BẮT BUỘC: Chuẩn hóa L2 lại cho Vector sau khi cộng EMA
-        norm = np.linalg.norm(self.feature)
-        if norm > 1e-6:
-            self.feature /= norm
-
-        # Reset bộ đếm mất dấu vì vừa tìm lại được đối tượng
         self.hits += 1
         self.time_since_update = 0
-
-        # Nếu đang ở trạng thái chờ xác nhận mà đủ số hits (n_init), chuyển sang CONFIRMED
         if self.state == TrackState.TENTATIVE and self.hits >= self._n_init:
             self.state = TrackState.CONFIRMED
 
     def mark_missed(self):
-        """
-        Xử lý khi không tìm thấy đối tượng trong frame hiện tại (Bị che khuất, đi khỏi cam).
-        """
-        # Nếu đang ở trạng thái TENTATIVE, chuyển ngay sang DELETED vì chưa đủ độ tin cậy.
         if self.state == TrackState.TENTATIVE:
             self.state = TrackState.DELETED
-        # Nếu đang ở trạng thái CONFIRMED, chỉ chuyển sang DELETED nếu đã mất dấu quá số frame tối đa (max_age).
         elif self.time_since_update > self._max_age:
             self.state = TrackState.DELETED
         
-    def is_tentative(self):
-        return self.state == TrackState.TENTATIVE
+    def is_tentative(self): return self.state == TrackState.TENTATIVE
+    def is_confirmed(self): return self.state == TrackState.CONFIRMED
+    def is_deleted(self): return self.state == TrackState.DELETED
     
-    def is_confirmed(self):
-        return self.state == TrackState.CONFIRMED
-    
-    def is_deleted(self):
-        return self.state == TrackState.DELETED
-    
-    def get_feature(self):
-        """
-        [THÊM MỚI] Hàm cung cấp vector đặc trưng cho việc tính khoảng cách Cosine bên tracker.py
-        """
-        return self.feature
+    def get_features(self): return np.array(self.features)
 
     def to_tlwh(self):
-        """
-        Dịch chuyển từ định dạng Toán học [cx, cy, a, h] trả ngược về [x_min, y_min, w, h] 
-        để Visualizer vẽ Bounding Box.
-        """
-        ret = self.mean[:4].copy()
-        ret[2] *= ret[3] # w = a * h
-        ret[0] -= ret[2] / 2 # x_min = cx - w/2
-        ret[1] -= ret[3] / 2 # y_min = cy - h/2
+        ret = self.ukf.mean[:4].copy()
+        ret[2] *= ret[3] 
+        ret[0] -= ret[2] / 2 
+        ret[1] -= ret[3] / 2 
         return ret
     
     def _tlwh_to_xyah(self, tlwh):
-        """
-        Chuyển đổi bounding box từ định dạng vẽ [x_min, y_min, w, h] sang [cx, cy, a, h].
-        """
         ret = np.asarray(tlwh, dtype=np.float32).copy()
-        ret[:2] += ret[2:] / 2 # cx = x_min + w/2, cy = y_min + h/2
-        
-        # SỬA LỖI TOÁN HỌC: Tránh lỗi Division by Zero (Chia cho 0) khi h = 0
-        ret[2] /= max(ret[3], 1e-3) # a = w / h
+        ret[:2] += ret[2:] / 2 
+        ret[2] /= max(ret[3], 1e-3) 
         return ret

@@ -3,35 +3,62 @@ import numpy as np
 from scipy.spatial.distance import cdist
 from scipy.optimize import linear_sum_assignment
 
-def compute_cosine_distance(features_old, features_new):
-    """
-    Tính ma trận chi phí (cost matrix) dựa trên khoảng cách Cosine.
+def compute_cosine_distance(tracks, features_new):
+    """Tính khoảng cách Cosine từ Det mới tới TOÀN BỘ góc nhìn trong Ngân hàng đặc trưng của Track"""
+    if len(tracks) == 0 or len(features_new) == 0:
+        return np.empty((len(tracks), len(features_new)))
     
-    Tại sao lại dùng Cosine thay vì Euclidean (L2)?
-    Trong ReID, hướng của vector đại diện cho sự phân bố đặc trưng (màu sắc, cấu trúc). 
-    Độ lớn (magnitude) của vector thường bị ảnh hưởng bởi độ sáng/tương phản.
-    Cosine Distance chỉ quan tâm đến "góc" giữa 2 vector, nên bền vững hơn trước thay đổi ánh sáng.
-    
-    Toán học: Cosine_Distance = 1 - Cosine_Similarity.
-    - Trùng hướng hoàn toàn: Sim = 1.0 -> Dist = 0.0
-    - Vuông góc (Không liên quan): Sim = 0.0 -> Dist = 1.0
-    - Ngược hướng hoàn toàn: Sim = -1.0 -> Dist = 2.0
-    
-    Args:
-        features_old: Mảng numpy shape (M, 512) của các Tracks (Mục tiêu đang theo dõi).
-        features_new: Mảng numpy shape (N, 512) của các Detections (Phát hiện mới từ YOLO).
+    cost_matrix = np.zeros((len(tracks), len(features_new)))
+    for i, track in enumerate(tracks):
+        gallery = track.get_features() # Ma trận các góc nhìn đã lưu
+        if len(gallery) == 0:
+            cost_matrix[i, :] = 1.0
+            continue
+            
+        # So sánh N det mới với M góc nhìn trong gallery
+        distances = cdist(gallery, features_new, metric='cosine')
         
-    Returns:
-        Ma trận cost_matrix shape (M, N).
-    """
-    # Xử lý edge-case: Nếu không có Track cũ hoặc không có Detection mới
-    if len(features_old) == 0 or len(features_new) == 0:
-        return np.empty((len(features_old), len(features_new)))
+        # Lấy khoảng cách NHỎ NHẤT (giống nhất với 1 góc nhìn bất kỳ từng thấy)
+        cost_matrix[i, :] = np.min(distances, axis=0)
+        
+    return cost_matrix
+
+def compute_iou_matrix(tracks, detections, img_w, img_h):
+    """Tính ma trận IoU có hỗ trợ Asymmetrical IoM khi xe chạm viền ảnh"""
+    if len(tracks) == 0 or len(detections) == 0:
+        return np.zeros((len(tracks), len(detections)))
     
-    # Sử dụng cdist của scipy. Nó được viết bằng C, tối ưu hóa qua BLAS/LAPACK 
-    # nên tính toán cực kỳ nhanh so với việc dùng hai vòng lặp for trong Python.
-    cost_matrix = cdist(features_old, features_new, metric='cosine')
-    
+    cost_matrix = np.zeros((len(tracks), len(detections)))
+    for i, trk in enumerate(tracks):
+        box1 = trk.to_tlwh() # Box UKF dự đoán
+        for j, det in enumerate(detections):
+            box2 = det.bbox # Box YOLO thực tế
+            
+            x_left, y_top = max(box1[0], box2[0]), max(box1[1], box2[1])
+            x_right, y_bottom = min(box1[0] + box1[2], box2[0] + box2[2]), min(box1[1] + box1[3], box2[1] + box2[3])
+            
+            if x_right < x_left or y_bottom < y_top:
+                cost_matrix[i, j] = 1.0
+                continue
+
+            intersection = (x_right - x_left) * (y_bottom - y_top)
+            area1, area2 = box1[2] * box1[3], box2[2] * box2[3]
+            iou = intersection / float(area1 + area2 - intersection + 1e-6)
+            
+            # --- ĐÃ SỬA: MỞ KHÓA LUẬT IOM CHO TOÀN MÀN HÌNH ---
+            # Bất kể xe bị che bởi lề ảnh hay bởi gốc cây giữa đường, 
+            # cứ giãn nở đột ngột là dùng IoM để cứu!
+            min_area = min(area1, area2)
+            iom = intersection / float(min_area + 1e-6)
+            
+            # Nếu box nhỏ nằm lọt thỏm > 80% trong box to -> Tha thứ sự giãn nở
+            if iom > 0.8:
+                best_metric = max(iou, iom)
+            else:
+                best_metric = iou 
+                
+            cost_matrix[i, j] = 1.0 - best_metric
+            
     return cost_matrix
 
 def linear_assignment(cost_matrix, tracks, detections, max_distance=0.2):

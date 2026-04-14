@@ -1,25 +1,26 @@
 import cv2
 import numpy as np
-from openvino.runtime import Core
+from openvino import Core, AsyncInferQueue
 
 class ReIDExtractor:
     def __init__(self, model_path, device="CPU"):
         self.ie = Core()
         self.model = self.ie.read_model(model=model_path)
         
-        # 1. Trích xuất Shape an toàn (Tránh lỗi Crash lúc khởi tạo)
         input_shape = self.model.input(0).partial_shape
         self.c = input_shape[1].get_length() if input_shape[1].is_static else 3
         self.h = input_shape[2].get_length() if input_shape[2].is_static else 256
-        self.w = input_shape[3].get_length() if input_shape[3].is_static else 256
+        self.w = input_shape[3].get_length() if input_shape[3].is_static else 128 
         
-        # 2. KHÔNG DÙNG PADDING NỮA. Khai báo Batch Size là Động (-1)
-        # Báo cho OpenVINO biết số lượng ảnh sẽ thay đổi linh hoạt.
-        self.model.reshape([-1, self.c, self.h, self.w])
+        # 1. TRỞ LẠI STATIC SHAPE (BATCH = 1) -> Khử hoàn toàn độ trễ cấp phát RAM
+        self.model.reshape([1, self.c, self.h, self.w])
         
-        # 3. Ưu tiên độ trễ thấp nhất cho luồng Tracking
-        config = {"PERFORMANCE_HINT": "LATENCY"}
+        # 2. CẤU HÌNH ĐA LUỒNG: THROUGHPUT sẽ mở tối đa số luồng (Streams) CPU
+        config = {"PERFORMANCE_HINT": "THROUGHPUT"}
         self.compiled_model = self.ie.compile_model(model=self.model, device_name=device, config=config)
+        
+        # 3. KHỞI TẠO HÀNG ĐỢI BẤT ĐỒNG BỘ (Vũ khí tối thượng)
+        self.infer_queue = AsyncInferQueue(self.compiled_model)
         
         self.input_layer = self.compiled_model.input(0)
         self.output_layer = self.compiled_model.output(0)
@@ -27,44 +28,57 @@ class ReIDExtractor:
         out_shape = self.output_layer.partial_shape
         self.output_dim = out_shape[-1].get_length() if out_shape[-1].is_static else 512 
 
+        self.is_osnet = "osnet" in model_path.lower()
+
     def _preprocess(self, img):
         resized = cv2.resize(img, (self.w, self.h))
+        
+        if self.is_osnet:
+            resized = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
+            resized = resized.astype(np.float32) / 255.0
+            mean = np.array([0.485, 0.456, 0.406], dtype=np.float32)
+            std = np.array([0.229, 0.224, 0.225], dtype=np.float32)
+            resized = (resized - mean) / std
+        else:
+            resized = resized.astype(np.float32)
+
         input_data = resized.transpose(2, 0, 1) 
-        input_data = input_data.reshape(1, self.c, self.h, self.w).astype(np.float32)
-        return input_data
+        return input_data.reshape(1, self.c, self.h, self.w) # Đóng gói lại thành [1, C, H, W]
 
     def extract(self, image, bboxes):
-        if bboxes is None or len(bboxes) == 0:
+        num_bboxes = len(bboxes) if bboxes is not None else 0
+        if num_bboxes == 0:
             return np.empty((0, self.output_dim), dtype=np.float32)
 
-        blobs = []
+        # Ma trận rỗng chờ chứa kết quả
+        features = np.zeros((num_bboxes, self.output_dim), dtype=np.float32)
         valid_indices = []
 
-        # Cắt và tiền xử lý từng xe
+        # 4. HÀM CALLBACK: Khi 1 luồng CPU tính xong 1 xe, nó tự động gọi hàm này để lưu kết quả
+        def callback(request, userdata):
+            idx = userdata
+            res = request.get_output_tensor(0).data[0]
+            features[idx] = res
+
+        self.infer_queue.set_callback(callback)
+
+        # 5. NÉM VIỆC CHO CPU: Duyệt qua các xe, tiền xử lý và ném ngay vào Hàng đợi
         for idx, bbox in enumerate(bboxes):
             x, y, w, h = [int(v) for v in bbox]
             crop = image[max(0, y):min(image.shape[0], y+h), 
                          max(0, x):min(image.shape[1], x+w)]
             if crop.size > 0:
-                blob = self._preprocess(crop) 
-                blobs.append(blob)
-                valid_indices.append(idx)
+                input_blob = self._preprocess(crop)
                 
-        if len(blobs) == 0:
-            return np.empty((0, self.output_dim), dtype=np.float32)
+                # Hàm này ném việc vào queue và lập tức quay lại vòng for (Không block Python)
+                self.infer_queue.start_async({0: input_blob}, userdata=idx)
+                valid_indices.append(idx)
 
-        # Gộp Mảng (Batching): Có 3 xe thì mảng là (3, C, H, W). Không đệm thêm rác!
-        batch_blob = np.concatenate(blobs, axis=0)
-        
-        # CPU chỉ tính toán đúng số lượng xe có thật trên màn hình
-        results = self.compiled_model([batch_blob])[self.output_layer] 
-        
-        # Chuẩn hóa L2 tốc độ cao bằng Vectorization
-        features = np.zeros((len(bboxes), self.output_dim), dtype=np.float32)
-        norms = np.linalg.norm(results, axis=1, keepdims=True)
-        normalized_results = np.divide(results, norms, out=np.zeros_like(results), where=norms > 1e-6)
-        
-        for i, v_idx in enumerate(valid_indices):
-            features[v_idx] = normalized_results[i]
+        # 6. CHỜ KẾT QUẢ: Bắt Python đợi cho đến khi tất cả các luồng CPU làm xong việc
+        self.infer_queue.wait_all()
+
+        # 7. L2 Normalization chuẩn
+        norms = np.linalg.norm(features, axis=1, keepdims=True)
+        features = np.divide(features, norms, out=np.zeros_like(features), where=norms > 1e-6)
             
         return features

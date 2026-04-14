@@ -62,8 +62,8 @@ class YOLODetector:
             1: 1,  # bicycle -> Cyclist
             2: 2,  # car -> Car
             3: 1,  # motorcycle -> Cyclist
-            5: 2,  # bus -> Car
-            7: 2   # truck -> Car
+            # 5: 2,  # bus -> Car
+            # 7: 2   # truck -> Car
         }
 
     def _letterbox(self, img, new_shape=(480, 480), color=(114, 114, 114)):
