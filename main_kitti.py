@@ -14,7 +14,7 @@ def main():
     
     SCALE_FACTOR = 1.0 
     NMS_THRESHOLD = 0.4 
-    CONF_THRESHOLD = 0.55
+    CONF_THRESHOLD = 0.7
     FPS = 10 
 
     parser = KittiParser(seq_dir="datasets/KITTI_MOT/KITTI-0001")

@@ -43,7 +43,10 @@ except ImportError:
 class YOLODetector:
     def __init__(self, model_path="weights/yolo11n_int8_openvino_model", conf_thresh=0.7):
         self.conf_thresh = conf_thresh
-        self.imgsz = 480
+        
+        # [SỬA ĐỔI]: Định nghĩa kích thước chữ nhật (Width x Height) thay vì 1 số nguyên
+        self.img_width = 960  
+        self.img_height = 288 
         
         print("Đang khởi tạo Lõi OpenVINO (Native Core)...")
         self.core = ov.Core()
@@ -66,18 +69,33 @@ class YOLODetector:
             # 7: 2   # truck -> Car
         }
 
-    def _letterbox(self, img, new_shape=(480, 480), color=(114, 114, 114)):
-        shape = img.shape[:2]
-        r = min(new_shape[0] / shape[0], new_shape[1] / shape[1])
-        new_unpad = int(round(shape[1] * r)), int(round(shape[0] * r))
-        dw, dh = new_shape[0] - new_unpad[0], new_shape[1] - new_unpad[1]
-        dw /= 2
-        dh /= 2
+    def _letterbox(self, img, new_shape=(960, 288), color=(114, 114, 114)):
+        # new_shape theo chuẩn OpenCV là (width, height)
+        shape = img.shape[:2]  # Kích thước ảnh gốc: [height, width]
+        
+        # 1. Tính toán tỷ lệ thu phóng (Scale ratio)
+        # Lấy tỷ lệ nhỏ nhất giữa Rộng_mới/Rộng_cũ và Cao_mới/Cao_cũ để giữ nguyên Aspect Ratio
+        r = min(new_shape[0] / shape[1], new_shape[1] / shape[0])
+        
+        # 2. Tính kích thước ảnh sau khi thu phóng (chưa có viền)
+        new_unpad = int(round(shape[1] * r)), int(round(shape[0] * r)) # (width, height)
+        
+        # 3. Tính lượng padding cần bù vào để đạt được new_shape
+        dw = new_shape[0] - new_unpad[0]  # Padding chiều rộng
+        dh = new_shape[1] - new_unpad[1]  # Padding chiều cao
+        
+        dw /= 2  # Chia đều padding ra hai bên trái/phải
+        dh /= 2  # Chia đều padding ra trên/dưới
+        
+        # 4. Thu phóng ảnh nếu kích thước thay đổi
         if shape[::-1] != new_unpad:
             img = cv2.resize(img, new_unpad, interpolation=cv2.INTER_LINEAR)
+            
+        # 5. Chèn viền (Padding)
         top, bottom = int(round(dh - 0.1)), int(round(dh + 0.1))
         left, right = int(round(dw - 0.1)), int(round(dw + 0.1))
         img = cv2.copyMakeBorder(img, top, bottom, left, right, cv2.BORDER_CONSTANT, value=color)
+        
         return img
 
     def _compute_ioa(self, box_person, box_vehicle):
@@ -93,9 +111,11 @@ class YOLODetector:
         person_area = (box_person[2] - box_person[0]) * (box_person[3] - box_person[1])
         return intersection_area / person_area if person_area > 0 else 0.0
 
-    def detect(self, image, imgsz=480):
+    def detect(self, image):  # Xóa bỏ tham số imgsz=480 ở đây
         # 1. TIỀN XỬ LÝ
-        img_padded = self._letterbox(image, new_shape=(imgsz, imgsz))
+        # [SỬA ĐỔI]: Truyền tuple (width, height) thay vì (imgsz, imgsz)
+        img_padded = self._letterbox(image, new_shape=(self.img_width, self.img_height))
+        
         img_blob = img_padded[:, :, ::-1].transpose(2, 0, 1)  
         img_blob = np.ascontiguousarray(img_blob)
         img_blob = img_blob.astype(np.float32) / 255.0
