@@ -14,10 +14,10 @@ def main():
     
     SCALE_FACTOR = 1.0 
     NMS_THRESHOLD = 0.4 
-    CONF_THRESHOLD = 0.7
+    CONF_THRESHOLD = 0.6
     FPS = 10 
 
-    parser = KittiParser(seq_dir="datasets/KITTI_MOT/KITTI-0001")
+    parser = KittiParser(seq_dir="datasets/KITTI_MOT/KITTI-0000")
     visualizer = Visualizer(output_path="outputs/videos/test_ukf_cmc.mp4", fps=FPS)
     
     detector = YOLODetector(model_path="weights/yolo11n_int8_openvino_model", conf_thresh=CONF_THRESHOLD)
