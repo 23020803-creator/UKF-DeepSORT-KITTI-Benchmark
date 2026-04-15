@@ -66,8 +66,6 @@ class Tracker:
 
         unmatched_trks_idx = [i for i, t in enumerate(self.tracks) if not t.is_deleted()]
         unmatched_dets_idx = list(range(len(valid_dets)))
-        
-        # --- (BÊN DƯỚI LÀ CODE VÒNG 1, VÒNG 2, VÒNG 3 CỦA BẠN GIỮ NGUYÊN) ---
 
         # ====================================================================
         # VÒNG 1: CASCADE REID (Ưu tiên ngoại hình)
@@ -158,12 +156,11 @@ class Tracker:
                         # ---------------------------------------------------------
                         # BƯỚC 1: TÍNH TOÁN CÁC THÔNG SỐ KHÔNG GIAN (BẮT BUỘC)
                         # ---------------------------------------------------------
-                        # 1. Lấy tọa độ và diện tích
+                        # 1. Tính toán IoM như cũ
                         det_x, det_y, det_w, det_h = det.bbox
                         proj_area = proj_w * proj_h
                         det_area = det_w * det_h
                         
-                        # 2. Tính toán IoM (Intersection over Minimum)
                         inter_x1 = max(proj_x, det_x)
                         inter_y1 = max(proj_y, det_y)
                         inter_x2 = min(proj_x + proj_w, det_x + det_w)
@@ -172,25 +169,43 @@ class Tracker:
                         inter = max(0, inter_x2 - inter_x1) * max(0, inter_y2 - inter_y1)
                         iom = inter / max(min(proj_area, det_area), 1e-6)
 
-                        # --- LƯỚI LỌC KHÔNG GIAN BÙ TRỪ NGOẠI HÌNH ---
+                        # =======================================================
+                        # [CHỐT CHẶN 1]: CENTER SHIFT GATING (Chống nhận vơ)
+                        # =======================================================
+                        det_cx, det_cy = det_x + det_w / 2, det_y + det_h / 2
+                        proj_cx, proj_cy = proj_x + proj_w / 2, proj_y + proj_h / 2
+                        dist_x = abs(det_cx - proj_cx)
+                        dist_y = abs(det_cy - proj_cy)
+                        
+                        # Sửa số 99 thành ID của chiếc xe trước khi bị nhảy số
+                        if trk.track_id == 18: 
+                            print(f"[RADAR VÒNG 3 - ID {trk.track_id}] IoM: {iom:.2f} | ReID: {feature_cost_v3[r, c]:.2f} | Lệch X: {dist_x:.1f} (Ngưỡng chặn: {proj_w * 0.8:.1f}) | Mất dấu: {trk.time_since_update} frames")
+                            
+                        # Bản chất: Nếu xe A bị xén ở lề, tâm hộp YOLO chỉ lệch tối đa 
+                        # khoảng 1 nửa chiều rộng (0.5 * proj_w). Nếu lệch tới > 0.8, 
+                        # nghĩa là có một Xe B khác đang nằm ở mép bên kia của vùng dự đoán.
+                        if dist_x > proj_w * 0.8 or dist_y > proj_h * 0.8:
+                            continue # Block ngay lập tức, không cho cướp ID
+
+                        # --- Phân loại khu vực ---
                         is_near_edge = (det_x <= 30 or det_y <= 30 or 
                                         det_x + det_w >= img_w - 30 or 
                                         det_y + det_h >= img_h - 30)
 
-                        # [RADAR DEBUG]: Dòng này sẽ giúp bạn hiểu bản chất mà không phải đoán mò
-                        if trk.track_id in [17, 116]:
-                            print(f"[DEBUG ID {trk.track_id:03d}] IoM: {iom:.2f} | Cosine: {feature_cost_v3[r, c]:.2f} | is_Edge: {is_near_edge}")
-
-                        # --- ÁP DỤNG LUẬT GÁN ---
+                        # =======================================================
+                        # [CHỐT CHẶN 2]: COST BLENDING (Giữ lại ReID)
+                        # =======================================================
                         if not is_near_edge:
-                            # Ở giữa ảnh: Chấp nhận IoM khá (>0.6) NHƯNG ReID phải cực kỳ chuẩn (<=0.6)
                             if iom > 0.60 and feature_cost_v3[r, c] <= 0.60: 
                                 bypass_cost[r, c] = 1.0 - iom
                         else:
-                            # Ở lề ảnh: ReID bị hỏng nên nới lỏng (<=0.75), 
-                            # NHƯNG ÉP IoM phải cực kỳ khít (>0.80) để chống xe ID 17 nhận vơ Xe Đỏ!
-                            if iom > 0.80 and feature_cost_v3[r, c] <= 0.75: 
-                                bypass_cost[r, c] = 1.0 - iom
+                            # Ở lề ảnh: Vẫn nới lỏng giới hạn đầu vào (ReID <= 0.85)
+                            # NHƯNG đưa ReID vào phương trình tính giá trị Cost.
+                            if iom > 0.80 and feature_cost_v3[r, c] <= 0.85: 
+                                # Hungarian sẽ ưu tiên ghép cặp có tổng điểm này THẤP NHẤT.
+                                # Xe A (cắt xén) có ReID = 0.6, Xe B (cướp) có ReID = 0.8.
+                                # Dù Xe B có IoM cao hơn chút đỉnh, nó vẫn sẽ thua Xe A ở tổng Cost.
+                                bypass_cost[r, c] = 0.5 * (1.0 - iom) + 0.5 * feature_cost_v3[r, c]
 
                 matches_v3, un_t_v3, un_d_v3 = matching.linear_assignment(bypass_cost, rec_tracks, rec_dets, 1.0)
 
