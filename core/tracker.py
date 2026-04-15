@@ -68,7 +68,7 @@ class Tracker:
         unmatched_dets_idx = list(range(len(valid_dets)))
 
         # ====================================================================
-        # VÒNG 1: CASCADE REID (Ưu tiên ngoại hình)
+        # VÒNG 1: CASCADE REID (Ưu tiên ngoại hình nhưng có CHỐT CHẶN KHÔNG GIAN)
         # ====================================================================
         matched_v1 = []
         for level in range(1, self.max_age + 1):
@@ -79,16 +79,66 @@ class Tracker:
             level_tracks = [self.tracks[i] for i in level_trk_idx]
             level_dets = [valid_dets[i] for i in unmatched_dets_idx]
 
+            # Tính ma trận ngoại hình (ReID)
             cost_matrix = matching.compute_cosine_distance(level_tracks, [d.feature for d in level_dets])
+            
+            # Tính thêm ma trận IoU để dùng làm bộ lọc không gian dự phòng
+            iou_matrix = matching.compute_iou_matrix(level_tracks, level_dets, img_w, img_h)
+
             for r, trk in enumerate(level_tracks):
+                # Lấy tọa độ dự đoán của UKF (Kinematics)
+                proj_x, proj_y, proj_w, proj_h = trk.to_tlwh()
+                proj_cx = proj_x + proj_w / 2
+                proj_cy = proj_y + proj_h / 2
+
                 for c, det in enumerate(level_dets):
+                    # 1. BỘ LỌC CƠ BẢN: Khác Class hoặc Ngoại hình quá khác biệt
                     if trk.class_id != det.class_id or cost_matrix[r, c] > self.cosine_threshold:
                         cost_matrix[r, c] = 1e5
+                        continue
 
+                    # =================================================================
+                    # 2. BỘ LỌC ĐỘNG HỌC (KINEMATIC GATING) - CHỐNG CƯỚP ID
+                    # =================================================================
+                    # Lấy tọa độ thực tế của YOLO Detection
+                    det_x, det_y, det_w, det_h = det.bbox
+                    det_cx = det_x + det_w / 2
+                    det_cy = det_y + det_h / 2
+
+                    # Tính độ lệch tâm (L2 Distance) giữa dự đoán và thực tế
+                    dist_x = abs(proj_cx - det_cx)
+                    dist_y = abs(proj_cy - det_cy)
+
+                    # Tính độ chênh lệch kích thước (Width và Height)
+                    diff_w_ratio = abs(proj_w - det_w) / max(proj_w, 1e-6)
+                    diff_h_ratio = abs(proj_h - det_h) / max(proj_h, 1e-6)
+
+                    # ---------------------------------------------------------
+                    # [DEBUG NÂNG CẤP] BẮT TẠI TRẬN CƯỚP ID XE ĐI SÁT NHAU
+                    # ---------------------------------------------------------
+                    if cost_matrix[r, c] < 0.25: # Nếu ngoại hình rất giống nhau
+                        
+                        is_far = dist_x > proj_w * 0.8 or dist_y > proj_h * 0.8 # Lệch tâm (đã siết chặt)
+                        is_shape_changed = diff_w_ratio > 0.3 or diff_h_ratio > 0.3 # Kích thước đổi đột ngột > 30%
+                        is_low_iou = iou_matrix[r, c] > 0.85 # IoU thực tế < 0.15 (gần như không chạm nhau)
+                        
+                        if is_far or is_shape_changed or is_low_iou:
+                            print(f"🛑 [BLOCK CƯỚP ID] ID Dự kiến: {trk.track_id} | Điểm giống nhau ReID: {cost_matrix[r, c]:.2f}")
+                            if is_far: print(f"   -> Lý do: Lệch vị trí (X:{dist_x:.1f}, Y:{dist_y:.1f})")
+                            if is_shape_changed: print(f"   -> Lý do: Tỷ lệ hộp thay đổi (W lệch {diff_w_ratio*100:.0f}%)")
+                            if is_low_iou: print(f"   -> Lý do: Vùng giao nhau (IoU) quá thấp.")
+                            
+                            # Cấm ghép cặp
+                            cost_matrix[r, c] = 1e5
+                            continue
+                    # ---------------------------------------------------------
+                    
+                    # (Nâng cao): Nếu muốn, bạn có thể trộn (Blend) một chút Cost của IoU vào 
+                    # để Hungarian ưu tiên ghép chiếc xe CÓ NGOẠI HÌNH GIỐNG + VỊ TRÍ GẦN NHẤT
+                    # cost_matrix[r, c] = 0.8 * cost_matrix[r, c] + 0.2 * iou_matrix[r, c]
+
+            # Chạy thuật toán Hungarian trên ma trận đã được thêm các "chốt chặn"
             matches, un_t, un_d = matching.linear_assignment(cost_matrix, level_tracks, level_dets, 1.0)
-            for trk_i, det_i in matches:
-                matched_v1.append((level_trk_idx[trk_i], unmatched_dets_idx[det_i]))
-            unmatched_dets_idx = [unmatched_dets_idx[i] for i in un_d]
 
         for trk_i, det_i in matched_v1:
             self.tracks[trk_i].update(valid_dets[det_i].bbox, valid_dets[det_i].feature, img_w, img_h)
