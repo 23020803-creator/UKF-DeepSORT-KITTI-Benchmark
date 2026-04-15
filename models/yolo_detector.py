@@ -44,7 +44,6 @@ class YOLODetector:
     def __init__(self, model_path="weights/yolo11n_int8_openvino_model", conf_thresh=0.7):
         self.conf_thresh = conf_thresh
         
-        # [SỬA ĐỔI]: Định nghĩa kích thước chữ nhật (Width x Height) thay vì 1 số nguyên
         self.img_width = 960  
         self.img_height = 288 
         
@@ -58,62 +57,35 @@ class YOLODetector:
         self.output_layer = self.compiled_model.output(0)
         print("✅ Đã load và biên dịch model trực tiếp lên CPU!")
 
-        # MAPPING MỚI: 0: Person, 1: Cyclist, 2: Car
-        # COCO IDs: 0: person, 1: bicycle, 2: car, 3: motorcycle, 5: bus, 7: truck
+        # [SỬA ĐỔI]: Chỉ giữ lại Person (0) và Car (2), đã loại bỏ xe đạp/xe máy
         self.coco_to_id = {
             0: 0,  # person -> Person
-            1: 1,  # bicycle -> Cyclist
             2: 2,  # car -> Car
-            3: 1,  # motorcycle -> Cyclist
-            # 5: 2,  # bus -> Car
-            # 7: 2   # truck -> Car
         }
 
     def _letterbox(self, img, new_shape=(960, 288), color=(114, 114, 114)):
-        # new_shape theo chuẩn OpenCV là (width, height)
-        shape = img.shape[:2]  # Kích thước ảnh gốc: [height, width]
+        shape = img.shape[:2]  
         
-        # 1. Tính toán tỷ lệ thu phóng (Scale ratio)
-        # Lấy tỷ lệ nhỏ nhất giữa Rộng_mới/Rộng_cũ và Cao_mới/Cao_cũ để giữ nguyên Aspect Ratio
         r = min(new_shape[0] / shape[1], new_shape[1] / shape[0])
+        new_unpad = int(round(shape[1] * r)), int(round(shape[0] * r)) 
         
-        # 2. Tính kích thước ảnh sau khi thu phóng (chưa có viền)
-        new_unpad = int(round(shape[1] * r)), int(round(shape[0] * r)) # (width, height)
+        dw = new_shape[0] - new_unpad[0]  
+        dh = new_shape[1] - new_unpad[1]  
         
-        # 3. Tính lượng padding cần bù vào để đạt được new_shape
-        dw = new_shape[0] - new_unpad[0]  # Padding chiều rộng
-        dh = new_shape[1] - new_unpad[1]  # Padding chiều cao
+        dw /= 2  
+        dh /= 2  
         
-        dw /= 2  # Chia đều padding ra hai bên trái/phải
-        dh /= 2  # Chia đều padding ra trên/dưới
-        
-        # 4. Thu phóng ảnh nếu kích thước thay đổi
         if shape[::-1] != new_unpad:
             img = cv2.resize(img, new_unpad, interpolation=cv2.INTER_LINEAR)
             
-        # 5. Chèn viền (Padding)
         top, bottom = int(round(dh - 0.1)), int(round(dh + 0.1))
         left, right = int(round(dw - 0.1)), int(round(dw + 0.1))
         img = cv2.copyMakeBorder(img, top, bottom, left, right, cv2.BORDER_CONSTANT, value=color)
         
         return img
 
-    def _compute_ioa(self, box_person, box_vehicle):
-        x_left = max(box_person[0], box_vehicle[0])
-        y_top = max(box_person[1], box_vehicle[1])
-        x_right = min(box_person[2], box_vehicle[2])
-        y_bottom = min(box_person[3], box_vehicle[3])
-
-        if x_right < x_left or y_bottom < y_top:
-            return 0.0
-
-        intersection_area = (x_right - x_left) * (y_bottom - y_top)
-        person_area = (box_person[2] - box_person[0]) * (box_person[3] - box_person[1])
-        return intersection_area / person_area if person_area > 0 else 0.0
-
-    def detect(self, image):  # Xóa bỏ tham số imgsz=480 ở đây
-        # 1. TIỀN XỬ LÝ
-        # [SỬA ĐỔI]: Truyền tuple (width, height) thay vì (imgsz, imgsz)
+    def detect(self, image):
+        # 1. TIỀN XỬ LÝ (Không được xóa phần này)
         img_padded = self._letterbox(image, new_shape=(self.img_width, self.img_height))
         
         img_blob = img_padded[:, :, ::-1].transpose(2, 0, 1)  
@@ -121,7 +93,7 @@ class YOLODetector:
         img_blob = img_blob.astype(np.float32) / 255.0
         img_blob = np.expand_dims(img_blob, axis=0)
 
-        # 2. INFERENCE
+        # 2. INFERENCE (Chạy model qua OpenVINO)
         raw_results = self.compiled_model([img_blob])[self.output_layer]
 
         # 3. HẬU XỬ LÝ
@@ -135,60 +107,25 @@ class YOLODetector:
 
         preds[0][:, :4] = scale_boxes(img_blob.shape[2:], preds[0][:, :4], image.shape).round()
         
-        temp_pedestrians = []
-        temp_vehicles = []
-        
+        # [SỬA ĐỔI]: Logic duyệt bounding box rút gọn mới
+        final_bboxes = []
+        final_confs = []
+        final_class_ids = []
+
         for det in preds[0]:
             x1, y1, x2, y2, conf, cls = det[:6]
             coco_cls_id = int(cls.item())
             
+            # Chỉ xử lý nếu đối tượng nằm trong danh sách Person (0) hoặc Car (2)
             if coco_cls_id not in self.coco_to_id:
                 continue
                 
             target_id = self.coco_to_id[coco_cls_id]
             
-            x1, y1, x2, y2 = int(x1.item()), int(y1.item()), int(x2.item()), int(y2.item())
-            
-            if target_id == 0: # Person
-                temp_pedestrians.append([x1, y1, x2, y2, conf.item(), target_id])
-            else:              # Cyclist (1) hoặc Car (2)
-                temp_vehicles.append([x1, y1, x2, y2, conf.item(), target_id])
-
-        # Quét để gộp Người vào Xe đạp/Xe máy (Entity Merging)
-        merged_pedestrian_indices = set()
-        for v_idx, vehicle in enumerate(temp_vehicles):
-            if vehicle[5] == 1:  # Nếu là Cyclist
-                for p_idx, person in enumerate(temp_pedestrians):
-                    if p_idx in merged_pedestrian_indices:
-                        continue
-                    if self._compute_ioa(person[:4], vehicle[:4]) > 0.3:
-                        # Cập nhật box xe bao trùm cả người
-                        temp_vehicles[v_idx][0] = min(vehicle[0], person[0])
-                        temp_vehicles[v_idx][1] = min(vehicle[1], person[1])
-                        temp_vehicles[v_idx][2] = max(vehicle[2], person[2])
-                        temp_vehicles[v_idx][3] = max(vehicle[3], person[3])
-                        temp_vehicles[v_idx][4] = max(vehicle[4], person[4])
-                        merged_pedestrian_indices.add(p_idx)
-
-        # TÁCH RA 3 MẢNG RIÊNG BIỆT
-        final_bboxes = []
-        final_confs = []
-        final_class_ids = []
-
-        # Thêm người (không bị gộp)
-        for p_idx, person in enumerate(temp_pedestrians):
-            if p_idx not in merged_pedestrian_indices:
-                x1, y1, x2, y2, conf, cls_id = person
-                final_bboxes.append([float(x1), float(y1), float(x2 - x1), float(y2 - y1)])
-                final_confs.append(float(conf))
-                final_class_ids.append(int(cls_id))
-                
-        # Thêm xe (đã gộp hoặc car)
-        for vehicle in temp_vehicles:
-            x1, y1, x2, y2, conf, cls_id = vehicle
-            final_bboxes.append([float(x1), float(y1), float(x2 - x1), float(y2 - y1)])
-            final_confs.append(float(conf))
-            final_class_ids.append(int(cls_id))
+            # Đẩy thẳng kết quả vào mảng final
+            final_bboxes.append([float(x1.item()), float(y1.item()), float(x2.item() - x1.item()), float(y2.item() - y1.item())])
+            final_confs.append(float(conf.item()))
+            final_class_ids.append(int(target_id))
 
         if not final_bboxes:
             return (np.empty((0, 4), dtype=np.float32), 
