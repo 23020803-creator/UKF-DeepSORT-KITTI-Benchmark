@@ -27,52 +27,51 @@ class Visualizer:
         return (int(color[0]), int(color[1]), int(color[2]))
 
     def draw_tracks(self, image, active_tracks, frame_idx=0):
-        """
-        Vẽ danh sách các track đang hoạt động (Confirmed) lên ảnh.
-        Input:
-            image: ảnh gốc BGR shape (H, W, 3)
-            active_tracks: List các tuple SÁU phần tử (track_id, class_id, x_min, y_min, w, h).
-            frame_idx: số thứ tự in trên góc màn hình để dễ debug.
-        Output:
-            drawn_image: Ảnh đã vẽ đè.
-        """
-        # Tạo bản sao sâu (copy) để không làm hỏng dữ liệu ảnh gốc trong RAM
         drawn_image = image.copy()
         h_img, w_img = drawn_image.shape[:2]
 
-        # Vẽ bảng thông tin tổng quan góc trái trên cùng
         cv2.putText(drawn_image, f"Frame: {frame_idx:04d}", (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2, cv2.LINE_AA)
         cv2.putText(drawn_image, f"Active Tracks: {len(active_tracks)}", (20, 80), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2, cv2.LINE_AA)
 
-        # Lặp qua từng phương tiện đang chạy
         for track in active_tracks:
-            # SỬA LỖI ĐỒNG BỘ: Ép giải nén chuẩn Tuple 6 phần tử thay vì slicing [1:5]
-            track_id, class_id, x, y, w, h = track
+            # Giải nén đúng 10 phần tử từ tracker.py
+            track_id, class_id, ukf_x, ukf_y, ukf_w, ukf_h, yolo_x, yolo_y, yolo_w, yolo_h = track
 
-            # Chuyển đổi định dạng w, h thành tọa độ (x2, y2) cho OpenCV
-            x1, y1 = int(x), int(y)
-            x2, y2 = int(x + w), int(y + h)
-
+            track_id = int(track_id)
+            class_id = int(class_id)
             color = self._get_color(track_id)
-            class_name = self.class_names.get(int(class_id), "Unknown")
+            class_name = self.class_names.get(class_id, "Unknown")
 
-            # 1. Vẽ bounding box
-            cv2.rectangle(drawn_image, (x1, y1), (x2, y2), color, 2)
+            # ==========================================
+            # 1. VẼ HỘP YOLO (Chỉ vẽ nếu w và h > 0)
+            # ==========================================
+            if yolo_w > 0 and yolo_h > 0:
+                yx1, yy1 = int(yolo_x), int(yolo_y)
+                yx2, yy2 = int(yolo_x + yolo_w), int(yolo_y + yolo_h)
+                
+                cv2.rectangle(drawn_image, (yx1, yy1), (yx2, yy2), (255, 255, 0), 1)
+                cv2.putText(drawn_image, "YOLO", (yx1, yy1 - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 0), 1, cv2.LINE_AA)
 
-            # 2. Tạo nội dung Label (SỬA: Hiển thị cả Class Name và ID)
+            # ==========================================
+            # 2. VẼ HỘP UKF (Màu sắc đậm, có ID và Tâm đỏ)
+            # ==========================================
+            ux1, uy1 = int(ukf_x), int(ukf_y)
+            ux2, uy2 = int(ukf_x + ukf_w), int(ukf_y + ukf_h)
+            cx, cy = int(ukf_x + ukf_w / 2.0), int(ukf_y + ukf_h / 2.0)
+
+            # Vẽ hộp dự đoán UKF
+            cv2.rectangle(drawn_image, (ux1, uy1), (ux2, uy2), color, 2)
+            # Vẽ tâm UKF
+            cv2.circle(drawn_image, (cx, cy), radius=4, color=(0, 0, 255), thickness=-1)
+
+            # Vẽ Label ID cho UKF
             label = f"{class_name} | ID: {track_id}"
-            (text_width, text_height), baseline = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 1)
-
-            # 3. Vẽ khối nền màu đặc cho Label để chữ không bị chìm vào background
-            cv2.rectangle(drawn_image, (x1, y1 - text_height - 10), (x1 + text_width, y1), color, -1)
-
-            # 4. Viết chữ màu trắng đè lên khối nền màu
-            cv2.putText(drawn_image, label, (x1, y1 - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1, cv2.LINE_AA)
+            (text_width, text_height), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 1)
+            cv2.rectangle(drawn_image, (ux1, uy1 - text_height - 10), (ux1 + text_width, uy1), color, -1)
+            cv2.putText(drawn_image, label, (ux1, uy1 - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1, cv2.LINE_AA)
         
-        # --- Khối logic lưu Video ---
         if self.writer is None:
             fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-            # Tự động tạo thư mục output nếu người dùng quên chưa tạo
             os.makedirs(os.path.dirname(self.output_path), exist_ok=True)
             self.writer = cv2.VideoWriter(self.output_path, fourcc, self.fps, (w_img, h_img))
         

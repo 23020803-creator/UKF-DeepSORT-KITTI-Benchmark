@@ -2,6 +2,7 @@
 import numpy as np
 from scipy.spatial.distance import cdist
 from scipy.optimize import linear_sum_assignment
+import scipy.linalg
 
 def compute_cosine_distance(tracks, features_new):
     """Tính khoảng cách Cosine từ Det mới tới Track (Đã tối ưu cho EMA)"""
@@ -125,3 +126,48 @@ def linear_assignment(cost_matrix, tracks, detections, max_distance=0.2):
             matches.append((row, col))
 
     return matches, unmatched_tracks, unmatched_detections
+
+def compute_mahalanobis_distance(tracks, detections):
+    """
+    Tính ma trận bình phương khoảng cách Mahalanobis (Dynamic Gating).
+    Trả về ma trận (M, N).
+    """
+    if len(tracks) == 0 or len(detections) == 0:
+        return np.zeros((len(tracks), len(detections)))
+    
+    dist_matrix = np.zeros((len(tracks), len(detections)))
+    
+    for i, trk in enumerate(tracks):
+        # 1. Trích xuất không gian đo lường dự đoán
+        mean_proj = trk.ukf.mean[:4]       # [cx, cy, a, h]
+        P_proj = trk.ukf.covariance[:4, :4]  # Ma trận P 4x4
+        
+        # 2. Tính ma trận nhiễu đo lường R (Đồng bộ với ukf.py)
+        h = max(trk.ukf.mean[3], 1.0)
+        std_pos = 0.02 * h
+        R = np.zeros((4, 4), dtype=np.float64)
+        R[0, 0] = R[1, 1] = R[3, 3] = std_pos ** 2
+        R[2, 2] = 1e-4
+        
+        # 3. Tính Innovation Covariance S = P + R
+        S = P_proj + R
+        try:
+            # Dùng Cholesky decomposition để giải nghịch đảo ma trận an toàn & nhanh hơn
+            cholesky_factor = scipy.linalg.cho_factor(S)
+        except np.linalg.LinAlgError:
+            # Fallback an toàn nếu hệ không xác định dương (Positive-definite)
+            S = S + np.eye(4) * 1e-6
+            cholesky_factor = scipy.linalg.cho_factor(S)
+            
+        for j, det in enumerate(detections):
+            # Biến đổi bbox YOLO về [cx, cy, a, h]
+            z = trk._tlwh_to_xyah(det.bbox)
+            innovation = z - mean_proj
+            
+            # Tính D^2 = innovation^T * S^-1 * innovation
+            y = scipy.linalg.cho_solve(cholesky_factor, innovation)
+            sq_maha_dist = np.dot(innovation, y)
+            
+            dist_matrix[i, j] = sq_maha_dist
+            
+    return dist_matrix

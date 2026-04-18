@@ -85,6 +85,36 @@ def main():
 
         # Bước 4: Đẩy hết dữ liệu cho Tracker xử lý (Tracker tự làm 3 vòng match)
         tracker.update(valid_bboxes, valid_confs, valid_class_ids, features, frame_shape=(img_h, img_w), H_camera=H_camera, frame_idx=frame_idx)
+
+        if 360 <= frame_idx <= 380:
+            print(f"--- Đang phân tích Frame {frame_idx} ---")
+            found_ids = []
+            
+            for trk in tracker.tracks:
+                if trk.track_id in [191, 196, 198]:
+                    found_ids.append(trk.track_id)
+                    if trk.state == 1: state_str = "TENTATIVE (Chờ duyệt)"
+                    elif trk.state == 2: state_str = "CONFIRMED (Đang bám)"
+                    else: state_str = "DELETED (Đã xóa)"
+                    
+                    ukf_x, ukf_y, ukf_w, ukf_h = trk.to_tlwh()
+                    
+                    # Lấy thông tin động học (vận tốc) từ vector trạng thái của UKF
+                    # Vector x: [cx, cy, a, h, vx, vy, omega, vh]
+                    vx = trk.ukf.mean[4]
+                    vy = trk.ukf.mean[5]
+                    omega = trk.ukf.mean[6]
+                    vh = trk.ukf.mean[7]
+                    
+                    print(f"  [>] ID: {trk.track_id} | State: {state_str}")
+                    print(f"      - Mất dấu (Time since update): {trk.time_since_update} frames")
+                    print(f"      - Hộp dự đoán: X:{ukf_x:.1f}, Y:{ukf_y:.1f}, W:{ukf_w:.1f}, H:{ukf_h:.1f}")
+                    print(f"      - Vận tốc: vx={vx:.2f}, vy={vy:.2f} | Cua(omega)={omega:.4f} | Giãn nở(vh)={vh:.2f}")
+                    
+            for target_id in [191, 196, 198]:
+                if target_id not in found_ids:
+                    print(f"  [!] ID: {target_id} | Đã BỊ XÓA HẲN khỏi bộ nhớ.")
+        # =====================================================================
         
         time_reid_total = (time.time() - t_reid_start) * 1000
         fps = 1.0 / (time.time() - frame_start_time)

@@ -81,16 +81,12 @@ class Tracker:
 
             # Tính ma trận ngoại hình (ReID)
             cost_matrix = matching.compute_cosine_distance(level_tracks, [d.feature for d in level_dets])
-            
-            # Tính thêm ma trận IoU để dùng làm bộ lọc không gian dự phòng
             iou_matrix = matching.compute_iou_matrix(level_tracks, level_dets, img_w, img_h)
+            
+            # GỌI MAHALANOBIS MỚI TẠO TẠI ĐÂY
+            maha_matrix = matching.compute_mahalanobis_distance(level_tracks, level_dets)
 
             for r, trk in enumerate(level_tracks):
-                # Lấy tọa độ dự đoán của UKF (Kinematics)
-                proj_x, proj_y, proj_w, proj_h = trk.to_tlwh()
-                proj_cx = proj_x + proj_w / 2
-                proj_cy = proj_y + proj_h / 2
-
                 for c, det in enumerate(level_dets):
                     # 1. BỘ LỌC CƠ BẢN: Khác Class hoặc Ngoại hình quá khác biệt
                     if trk.class_id != det.class_id or cost_matrix[r, c] > self.cosine_threshold:
@@ -98,44 +94,29 @@ class Tracker:
                         continue
 
                     # =================================================================
-                    # 2. BỘ LỌC ĐỘNG HỌC (KINEMATIC GATING) - CHỐNG CƯỚP ID
+                    # 2. BỘ LỌC ĐỘNG HỌC MAHALANOBIS (DYNAMIC KINEMATIC GATING)
                     # =================================================================
-                    # Lấy tọa độ thực tế của YOLO Detection
-                    det_x, det_y, det_w, det_h = det.bbox
-                    det_cx = det_x + det_w / 2
-                    det_cy = det_y + det_h / 2
-
-                    # Tính độ lệch tâm (L2 Distance) giữa dự đoán và thực tế
-                    dist_x = abs(proj_cx - det_cx)
-                    dist_y = abs(proj_cy - det_cy)
-
-                    # Tính độ chênh lệch kích thước (Width và Height)
-                    diff_w_ratio = abs(proj_w - det_w) / max(proj_w, 1e-6)
-                    diff_h_ratio = abs(proj_h - det_h) / max(proj_h, 1e-6)
-
-                    # ---------------------------------------------------------
-                    # [DEBUG NÂNG CẤP] BẮT TẠI TRẬN CƯỚP ID XE ĐI SÁT NHAU
-                    # ---------------------------------------------------------
-                    if cost_matrix[r, c] < 0.25: # Nếu ngoại hình rất giống nhau
-                        
-                        is_far = dist_x > proj_w * 0.8 or dist_y > proj_h * 0.8 # Lệch tâm (đã siết chặt)
-                        is_shape_changed = diff_w_ratio > 0.3 or diff_h_ratio > 0.3 # Kích thước đổi đột ngột > 30%
-                        is_low_iou = iou_matrix[r, c] > 0.85 # IoU thực tế < 0.15 (gần như không chạm nhau)
-                        
-                        if is_far or is_shape_changed or is_low_iou:
-                            print(f"🛑 [BLOCK CƯỚP ID] ID Dự kiến: {trk.track_id} | Điểm giống nhau ReID: {cost_matrix[r, c]:.2f}")
-                            if is_far: print(f"   -> Lý do: Lệch vị trí (X:{dist_x:.1f}, Y:{dist_y:.1f})")
-                            if is_shape_changed: print(f"   -> Lý do: Tỷ lệ hộp thay đổi (W lệch {diff_w_ratio*100:.0f}%)")
-                            if is_low_iou: print(f"   -> Lý do: Vùng giao nhau (IoU) quá thấp.")
-                            
-                            # Cấm ghép cặp
-                            cost_matrix[r, c] = 1e5
-                            continue
-                    # ---------------------------------------------------------
+                    # Ngưỡng Chi-square cho 4 bậc tự do (cx, cy, a, h) tại p=0.05 là 9.4877
+                    gating_threshold = 9.4877
+                    dynamic_threshold = gating_threshold
                     
-                    # (Nâng cao): Nếu muốn, bạn có thể trộn (Blend) một chút Cost của IoU vào 
-                    # để Hungarian ưu tiên ghép chiếc xe CÓ NGOẠI HÌNH GIỐNG + VỊ TRÍ GẦN NHẤT
-                    # cost_matrix[r, c] = 0.8 * cost_matrix[r, c] + 0.2 * iou_matrix[r, c]
+                    # DYNAMIC GATING: Nới lỏng giới hạn vật lý nhờ ReID
+                    # cost_matrix[r, c] lúc này đang lưu giá trị Cosine Distance của ReID
+                    if cost_matrix[r, c] < 0.2:
+                        # Xe giống hệt nhau -> Nới lỏng giới hạn không gian lên gấp 3 lần 
+                        # để cho phép quỹ đạo bị lệch do đi qua gốc cây/vật cản
+                        dynamic_threshold = gating_threshold * 3.0
+                    
+                    if maha_matrix[r, c] > dynamic_threshold:
+                        # Cấm ghép cặp (Gating)
+                        cost_matrix[r, c] = 1e5
+                        continue
+
+                    # Nâng cao: Blend Cost. Giúp Hungarian có cái nhìn toàn diện hơn
+                    # Ưu tiên: Ngoại hình giống + Động học (Mahalanobis) hợp lý + IoU cao
+                    # Đưa maha_matrix về scale [0, 1] xấp xỉ để blend
+                    norm_maha = min(maha_matrix[r, c] / gating_threshold, 1.0)
+                    cost_matrix[r, c] = 0.7 * cost_matrix[r, c] + 0.15 * iou_matrix[r, c] + 0.15 * norm_maha
 
             # Chạy thuật toán Hungarian trên ma trận đã được thêm các "chốt chặn"
             matches, un_t, un_d = matching.linear_assignment(cost_matrix, level_tracks, level_dets, 1.0)
@@ -226,10 +207,6 @@ class Tracker:
                         proj_cx, proj_cy = proj_x + proj_w / 2, proj_y + proj_h / 2
                         dist_x = abs(det_cx - proj_cx)
                         dist_y = abs(det_cy - proj_cy)
-                        
-                        # Sửa số 99 thành ID của chiếc xe trước khi bị nhảy số
-                        if trk.track_id == 18: 
-                            print(f"[RADAR VÒNG 3 - ID {trk.track_id}] IoM: {iom:.2f} | ReID: {feature_cost_v3[r, c]:.2f} | Lệch X: {dist_x:.1f} (Ngưỡng chặn: {proj_w * 0.8:.1f}) | Mất dấu: {trk.time_since_update} frames")
                             
                         # Bản chất: Nếu xe A bị xén ở lề, tâm hộp YOLO chỉ lệch tối đa 
                         # khoảng 1 nửa chiều rộng (0.5 * proj_w). Nếu lệch tới > 0.8, 
@@ -301,4 +278,18 @@ class Tracker:
         self.tracks = [t for t in self.tracks if not t.is_deleted()]
 
     def get_results(self):
-        return [(t.track_id, t.class_id, *t.to_tlwh()) for t in self.tracks if t.time_since_update == 0 and t.is_confirmed()]
+        # Trả về tuple 10 phần tử: (track_id, class_id, ukf_x, ukf_y, ukf_w, ukf_h, yolo_x, yolo_y, yolo_w, yolo_h)
+        results = []
+        for t in self.tracks:
+            # Cho phép UKF duy trì dự đoán trên màn hình tối đa 10 frame khi mất dấu
+            if t.time_since_update <= 10 and t.is_confirmed():
+                
+                # LOGIC LỌC BÓNG MA YOLO:
+                if t.time_since_update == 0:
+                    yolo_box = t.last_bbox # YOLO bắt được -> Lấy tọa độ thật
+                else:
+                    yolo_box = [0, 0, 0, 0] # YOLO mù -> Ép tọa độ YOLO về 0 để tàng hình
+                    
+                results.append((t.track_id, t.class_id, *t.to_tlwh(), *yolo_box))
+                
+        return results

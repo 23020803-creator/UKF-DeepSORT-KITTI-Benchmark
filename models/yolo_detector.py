@@ -98,7 +98,9 @@ class YOLODetector:
 
         # 3. HẬU XỬ LÝ
         preds = torch.from_numpy(raw_results)
-        preds = non_max_suppression(preds, conf_thres=self.conf_thresh, iou_thres=0.45, max_det=300)
+        
+        # Chỉ siết iou_thres xuống 0.30, giữ nguyên mặc định (agnostic=False)
+        preds = non_max_suppression(preds, conf_thres=self.conf_thresh, iou_thres=0.30, max_det=300)
         
         if len(preds) == 0 or len(preds[0]) == 0:
             return (np.empty((0, 4), dtype=np.float32), 

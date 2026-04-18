@@ -31,8 +31,6 @@ class Track:
 
     def predict(self, H_camera=None):
         self.ukf.predict(H_camera)
-        if self.time_since_update > 0:
-            self.ukf.mean[4:] *= 0.95 
         self.age += 1
         self.time_since_update += 1
 
@@ -43,25 +41,26 @@ class Track:
         current_w = self.ukf.mean[2] * self.ukf.mean[3]
         new_w = detection_bbox[2]
         
-        # Đổi thành > 1. Xe track bình thường sau khi predict() sẽ có giá trị là 1.
-        # > 1 nghĩa là xe đã bị mất dấu ít nhất 1 frame (ví dụ: lấp sau cây).
+        # ==========================================
+        # 1. SOFT REBOOT: CHỈ BƠM VỊ TRÍ + KÍCH THƯỚC (Bảo toàn Vận tốc)
+        # ==========================================
         if new_w > 1.5 * current_w or new_w < 0.6 * current_w or self.time_since_update > 1:
             
-            # 1. REBOOT TOÀN BỘ BỘ LỌC UKF
-            # Dùng initiate() để thiết lập lại tâm, kích thước và ma trận hiệp phương sai P từ đầu.
-            # Thao tác này chặn hoàn toàn lỗi Overshoot của hàm update().
-            self.ukf.initiate(bbox_ukf)
+            # Bơm P cho Vị trí (X, Y) để snap vào YOLO
+            self.ukf.covariance[0, 0] = (2.0 * bbox_ukf[3]) ** 2
+            self.ukf.covariance[1, 1] = (2.0 * bbox_ukf[3]) ** 2
             
-            # 2. TẨY NÃO ĐẶC TRƯNG REID
-            if detection_feature is not None:
-                self.smooth_feature = detection_feature.copy()
-                
+            # Bơm P cho Kích thước (a, h) để hấp thụ biến đổi phối cảnh khi xe lao tới
+            self.ukf.covariance[2, 2] = 1e-1           
+            self.ukf.covariance[3, 3] = (1.0 * bbox_ukf[3]) ** 2  
+            
+            # (Không chạm vào covariance 4, 5 của vận tốc)
+            self.ukf.update(bbox_ukf)
         else:
-            # 3. CHỈ gọi update khi xe không bị khuất và kích thước bình thường
             self.ukf.update(bbox_ukf)
 
         # ==========================================
-        # Cập nhật Feature EMA (Lọc thông thấp)
+        # 2. CẬP NHẬT REID (BẢO VỆ MÉP MÀN HÌNH)
         # ==========================================
         if detection_feature is not None:
             x, y, w, h = detection_bbox

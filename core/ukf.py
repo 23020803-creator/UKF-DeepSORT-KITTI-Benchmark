@@ -60,24 +60,42 @@ class TrackUKF:
         
         h = meas[3]
         covariance = np.zeros((8, 8), dtype=np.float64)
-        covariance[0, 0] = covariance[1, 1] = covariance[3, 3] = (0.05 * h) ** 2
-        covariance[2, 2] = 1e-4
-        covariance[4, 4] = covariance[5, 5] = covariance[7, 7] = (0.01 * h) ** 2
-        covariance[6, 6] = 1e-5
+        
+        # 1. Độ bất định vị trí: Cho phép sai số nhỏ (tin tưởng hờ vào vị trí khởi tạo)
+        covariance[0, 0] = covariance[1, 1] = covariance[3, 3] = (0.1 * h) ** 2
+        covariance[2, 2] = 1e-2
+        
+        self.ukf.P[4, 4] = self.ukf.P[5, 5] = self.ukf.P[7, 7] = (10.0 * h) ** 2
+        self.ukf.P[6, 6] = 1e-2
         
         self.ukf.x = mean
         self.ukf.P = self._enforce_spd(covariance)
 
     def _get_dynamic_Q(self, h):
-        std_pos = 0.1 * h
-        std_vel = 0.05 * h
+        std_pos = 0.05 * h
+        std_vel = 0.5 * h  # GIỮ NGUYÊN: Đủ lớn để hệ thống phản ứng với ma trận kéo lùi của CMC
         
         Q = np.zeros((8, 8), dtype=np.float64)
         Q[0, 0] = Q[1, 1] = Q[3, 3] = std_pos ** 2
         Q[2, 2] = 1e-4
+        
         Q[4, 4] = Q[5, 5] = Q[7, 7] = std_vel ** 2
-        Q[6, 6] = 1e-5
+        Q[6, 6] = 1e-4
+        
         return self._enforce_spd(Q)
+
+    def update(self, measurement):
+        h = max(self.ukf.x[3], 1.0)
+        # GIỮ NGUYÊN: Ép hệ thống tin tưởng tuyệt đối vào tọa độ YOLO
+        std_pos = 0.02 * h 
+        
+        R = np.zeros((4, 4), dtype=np.float64)
+        R[0, 0] = R[1, 1] = R[3, 3] = std_pos ** 2
+        R[2, 2] = 1e-4
+        
+        self.ukf.R = self._enforce_spd(R)
+        self.ukf.update(np.asarray(measurement, dtype=np.float64))
+        self.ukf.P = self._enforce_spd(self.ukf.P)
 
     def predict(self, H_camera=None):
         if H_camera is not None:
@@ -103,11 +121,11 @@ class TrackUKF:
 
     def update(self, measurement):
         h = max(self.ukf.x[3], 1.0)
-        std_pos = 0.02 * h
+        std_pos = 0.05 * h # Mức độ tin tưởng YOLO tiêu chuẩn
         
         R = np.zeros((4, 4), dtype=np.float64)
         R[0, 0] = R[1, 1] = R[3, 3] = std_pos ** 2
-        R[2, 2] = 1e-4
+        R[2, 2] = 1e-2 
         
         self.ukf.R = self._enforce_spd(R)
         self.ukf.update(np.asarray(measurement, dtype=np.float64))
