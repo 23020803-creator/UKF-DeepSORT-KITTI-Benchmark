@@ -42,22 +42,52 @@ class Track:
         new_w = detection_bbox[2]
         
         # ==========================================
-        # 1. SOFT REBOOT: CHỈ BƠM VỊ TRÍ + KÍCH THƯỚC (Bảo toàn Vận tốc)
+        # 1. LƯU LẠI VẬN TỐC CŨ (TRƯỚC KHI UPDATE)
+        # ==========================================
+        old_vx = self.ukf.mean[4]
+        old_vy = self.ukf.mean[5]
+
+        # ==========================================
+        # 2. CHẠY UPDATE UKF BÌNH THƯỜNG (Có thể bỏ cái logic 5% cũ đi, 
+        #    chỉ giữ lại Soft Reboot cơ bản theo w của bạn ban đầu)
         # ==========================================
         if new_w > 1.5 * current_w or new_w < 0.6 * current_w or self.time_since_update > 1:
-            
-            # Bơm P cho Vị trí (X, Y) để snap vào YOLO
             self.ukf.covariance[0, 0] = (2.0 * bbox_ukf[3]) ** 2
             self.ukf.covariance[1, 1] = (2.0 * bbox_ukf[3]) ** 2
-            
-            # Bơm P cho Kích thước (a, h) để hấp thụ biến đổi phối cảnh khi xe lao tới
             self.ukf.covariance[2, 2] = 1e-1           
             self.ukf.covariance[3, 3] = (1.0 * bbox_ukf[3]) ** 2  
-            
-            # (Không chạm vào covariance 4, 5 của vận tốc)
             self.ukf.update(bbox_ukf)
         else:
             self.ukf.update(bbox_ukf)
+
+        # ==========================================
+        # 3. POST-UPDATE CONSTRAINING (RÀNG BUỘC VẬT LÝ SAU UPDATE)
+        # ==========================================
+        new_vx = self.ukf.mean[4]
+        new_vy = self.ukf.mean[5]
+        
+        # A. Giới hạn Gia tốc (Max Acceleration)
+        # Cài đặt ngưỡng: Xe không thể thay đổi quá 12 pixel mỗi frame
+        max_dv = 100.0 
+        
+        dvx = new_vx - old_vx
+        dvy = new_vy - old_vy
+        
+        if abs(dvx) > max_dv:
+            # Ép vận tốc về ngưỡng tối đa cho phép
+            self.ukf.mean[4] = old_vx + np.sign(dvx) * max_dv
+            
+        if abs(dvy) > max_dv:
+            self.ukf.mean[5] = old_vy + np.sign(dvy) * max_dv
+
+        # B. Chống lật hướng đột ngột (Directional Inertia)
+        # Nếu xe đang có vận tốc rõ rệt (> 5) mà UKF lại tính ra vận tốc ngược chiều
+        if abs(old_vx) > 5.0 and (old_vx * self.ukf.mean[4] < 0):
+            # Ép xe "phanh gấp" (v = 0) thay vì bay ngược lại
+            self.ukf.mean[4] = 0.0
+            
+        if abs(old_vy) > 5.0 and (old_vy * self.ukf.mean[5] < 0):
+            self.ukf.mean[5] = 0.0
 
         # ==========================================
         # 2. CẬP NHẬT REID (BẢO VỆ MÉP MÀN HÌNH)

@@ -91,7 +91,7 @@ def main():
             found_ids = []
             
             for trk in tracker.tracks:
-                if trk.track_id in [191, 196, 198]:
+                if trk.track_id in [191, 196]:
                     found_ids.append(trk.track_id)
                     if trk.state == 1: state_str = "TENTATIVE (Chờ duyệt)"
                     elif trk.state == 2: state_str = "CONFIRMED (Đang bám)"
@@ -111,7 +111,7 @@ def main():
                     print(f"      - Hộp dự đoán: X:{ukf_x:.1f}, Y:{ukf_y:.1f}, W:{ukf_w:.1f}, H:{ukf_h:.1f}")
                     print(f"      - Vận tốc: vx={vx:.2f}, vy={vy:.2f} | Cua(omega)={omega:.4f} | Giãn nở(vh)={vh:.2f}")
                     
-            for target_id in [191, 196, 198]:
+            for target_id in [191, 196]:
                 if target_id not in found_ids:
                     print(f"  [!] ID: {target_id} | Đã BỊ XÓA HẲN khỏi bộ nhớ.")
         # =====================================================================
