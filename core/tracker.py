@@ -32,18 +32,19 @@ class Tracker:
             
             cx, cy = x + w / 2.0, y + h / 2.0
             
-            # Điều kiện 1: Tâm xe văng hẳn ra ngoài camera
-            # (Fix: Cho phép xe sống thêm 3 frame ở ngoài lề để chờ Vòng 3 cứu)
-            is_center_outside = (cx < 0 or cx > img_w or cy < 0 or cy > img_h)
-            if is_center_outside and trk.time_since_update > 3:
+            # Điều kiện 1: Xe đã văng HOÀN TOÀN ra khỏi không gian camera (Không còn dính 1 pixel nào)
+            is_completely_outside = (x + w < 0 or x > img_w or y + h < 0 or y > img_h)
+            if is_completely_outside:
                 trk.state = TrackState.DELETED
+                continue
             
-            # Điều kiện 2: Xe chạm lề (còn trong camera nhưng dễ bị YOLO bắt hụt)
+            # Điều kiện 2: Xe vẫn còn dính ở lề (Tâm văng ra ngoài hoặc chạm margin)
+            # YOLO rất hay bắt hụt ở đây. Ta cấp cho nó "kim bài miễn tử" 15 frame!
             margin = 15
-            # QUAN TRỌNG: Ở đây sử dụng x, y, w, h (không dùng det_x)
             is_touching_margin = (x < margin or y < margin or x + w > img_w - margin or y + h > img_h - margin)
+            is_center_outside = (cx < 0 or cx > img_w or cy < 0 or cy > img_h)
             
-            if is_touching_margin and trk.time_since_update > 5: # Cho phép YOLO miss 5 frame ở lề
+            if (is_touching_margin or is_center_outside) and trk.time_since_update > 15:
                 trk.state = TrackState.DELETED
 
         # ====================================================================
@@ -215,24 +216,45 @@ class Tracker:
                             continue # Block ngay lập tức, không cho cướp ID
 
                         # --- Phân loại khu vực ---
-                        is_near_edge = (det_x <= 30 or det_y <= 30 or 
-                                        det_x + det_w >= img_w - 30 or 
-                                        det_y + det_h >= img_h - 30)
+                        is_near_left = (det_x <= 30)
+                        is_near_right = (det_x + det_w >= img_w - 30)
+                        is_near_top = (det_y <= 30)
+                        is_near_bottom = (det_y + det_h >= img_h - 30)
+                        is_near_edge = is_near_left or is_near_right or is_near_top or is_near_bottom
 
                         # =======================================================
-                        # [CHỐT CHẶN 2]: COST BLENDING (Giữ lại ReID)
+                        # [CHỐT CHẶN 2]: INVARIANT EDGE ALIGNMENT & DYNAMIC GATING
                         # =======================================================
                         if not is_near_edge:
+                            # Ở giữa ảnh: Cần ReID xác nhận chống ID Switch
                             if iom > 0.60 and feature_cost_v3[r, c] <= 0.60: 
                                 bypass_cost[r, c] = 1.0 - iom
                         else:
-                            # Ở lề ảnh: Vẫn nới lỏng giới hạn đầu vào (ReID <= 0.85)
-                            # NHƯNG đưa ReID vào phương trình tính giá trị Cost.
-                            if iom > 0.80 and feature_cost_v3[r, c] <= 0.85: 
-                                # Hungarian sẽ ưu tiên ghép cặp có tổng điểm này THẤP NHẤT.
-                                # Xe A (cắt xén) có ReID = 0.6, Xe B (cướp) có ReID = 0.8.
-                                # Dù Xe B có IoM cao hơn chút đỉnh, nó vẫn sẽ thua Xe A ở tổng Cost.
-                                bypass_cost[r, c] = 0.5 * (1.0 - iom) + 0.5 * feature_cost_v3[r, c]
+                            # Ở lề ảnh: REID ĐÃ CHẾT, CHỈ TIN TOÁN HỌC CẠNH (EDGE)
+                            # 1. Hạ IoM xuống 0.50 để bù sai số YOLO bắt muộn
+                            if iom > 0.50: 
+                                edge_penalty = 1.0 
+                                
+                                # Tính toán độ lệch của cạnh đối diện lề bị xén
+                                if is_near_left:
+                                    edge_penalty = abs((proj_x + proj_w) - (det_x + det_w)) / (proj_w + 1e-6)
+                                elif is_near_right:
+                                    edge_penalty = abs(proj_x - det_x) / (proj_w + 1e-6)
+                                elif is_near_top:
+                                    edge_penalty = abs((proj_y + proj_h) - (det_y + det_h)) / (proj_h + 1e-6)
+                                elif is_near_bottom:
+                                    edge_penalty = abs(proj_y - det_y) / (proj_h + 1e-6)
+                                    
+                                # 2. NGƯỠNG ĐỘNG (Dynamic Threshold) bù đắp điểm mù khi xe đánh lái
+                                # Tăng 3% sai số cho mỗi frame mất dấu. Tối đa 40%.
+                                dynamic_edge_thresh = min(0.40, 0.15 + 0.03 * trk.time_since_update)
+                                
+                                # 3. Chốt chặn sinh tử nhận thức độ bất định
+                                if edge_penalty > dynamic_edge_thresh:
+                                    continue
+                                    
+                                # Vượt qua bài test -> Ép cost cực thấp để ghép cặp bằng mọi giá
+                                bypass_cost[r, c] = 0.5 * (1.0 - iom) + 0.5 * edge_penalty
 
                 matches_v3, un_t_v3, un_d_v3 = matching.linear_assignment(bypass_cost, rec_tracks, rec_dets, 1.0)
 
@@ -267,14 +289,14 @@ class Tracker:
             
             is_out_of_frame = (x < margin or y < margin or x + w > img_w - margin or y + h > img_h - margin)
             
-            # 2. Sửa lỗi cốt lõi: Chỉ giết ID nếu nó sát lề VÀ đã mất dấu quá 5 frame
-            # (Đồng bộ với logic ở đầu hàm update)
-            if is_out_of_frame and trk.time_since_update > 5:
+            # 2. Sửa lỗi cốt lõi: Chỉ giết ID nếu nó sát lề VÀ đã mất dấu quá 15 frame
+            # (Đồng bộ với logic 15 frame ở đầu hàm update)
+            if is_out_of_frame and trk.time_since_update > 15:
                 trk.state = TrackState.DELETED
             # 3. Hoặc nếu xe nằm giữa màn hình nhưng mất dấu vượt quá max_age
             elif trk.is_deleted(): 
                 pass
-
+                
         self.tracks = [t for t in self.tracks if not t.is_deleted()]
 
     def get_results(self):

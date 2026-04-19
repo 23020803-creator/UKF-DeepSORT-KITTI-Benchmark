@@ -138,9 +138,34 @@ def compute_mahalanobis_distance(tracks, detections):
     dist_matrix = np.zeros((len(tracks), len(detections)))
     
     for i, trk in enumerate(tracks):
-        # 1. Trích xuất không gian đo lường dự đoán
-        mean_proj = trk.ukf.mean[:4]       # [cx, cy, a, h]
-        P_proj = trk.ukf.covariance[:4, :4]  # Ma trận P 4x4
+        # === BẮT ĐẦU PHẦN SỬA ĐỔI ===
+        # 1. Trích xuất State thô
+        raw_state = trk.ukf.mean
+        cx, cy, a, h = raw_state[0], raw_state[1], raw_state[2], raw_state[3]
+        w = a * h
+        
+        # 2. Chiếu State thô sang Measurement Space (Giả lập lại h(x))
+        xmin = max(0.0, cx - w / 2.0)
+        xmax = min(1242.0, cx + w / 2.0)
+        ymin = max(0.0, cy - h / 2.0)
+        ymax = min(375.0, cy + h / 2.0)
+        
+        # Nếu xe văng hẳn ra ngoài, đánh chi phí cực đại để tránh chia 0
+        if xmin >= xmax or ymin >= ymax:
+            dist_matrix[i, :] = 1e5
+            continue
+            
+        w_obs = xmax - xmin
+        h_obs = ymax - ymin
+        cx_obs = (xmin + xmax) / 2.0
+        cy_obs = (ymin + ymax) / 2.0
+        a_obs = w_obs / h_obs if h_obs > 0 else a
+        
+        # Đây mới là Không gian Đo lường thực sự mà YOLO nhìn thấy!
+        mean_proj = np.array([cx_obs, cy_obs, a_obs, h_obs])
+        # === KẾT THÚC PHẦN SỬA ĐỔI ===
+        
+        P_proj = trk.ukf.covariance[:4, :4]
         
         # 2. Tính ma trận nhiễu đo lường R (Đồng bộ với ukf.py)
         h = max(trk.ukf.mean[3], 1.0)

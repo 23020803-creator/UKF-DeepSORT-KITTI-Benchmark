@@ -14,10 +14,10 @@ def main():
     
     SCALE_FACTOR = 1.0 
     NMS_THRESHOLD = 0.4 
-    CONF_THRESHOLD = 0.6
+    CONF_THRESHOLD = 0.55
     FPS = 10 
 
-    parser = KittiParser(seq_dir="datasets/KITTI_MOT/KITTI-0001")
+    parser = KittiParser(seq_dir="datasets/KITTI_MOT/KITTI-0000")
     visualizer = Visualizer(output_path="outputs/videos/test_ukf_cmc.mp4", fps=FPS)
     
     detector = YOLODetector(model_path="weights/yolo11n_int8_openvino_model", conf_thresh=CONF_THRESHOLD)
@@ -86,12 +86,12 @@ def main():
         # Bước 4: Đẩy hết dữ liệu cho Tracker xử lý (Tracker tự làm 3 vòng match)
         tracker.update(valid_bboxes, valid_confs, valid_class_ids, features, frame_shape=(img_h, img_w), H_camera=H_camera, frame_idx=frame_idx)
 
-        if 360 <= frame_idx <= 380:
+        if 35 <= frame_idx <= 65:
             print(f"--- Đang phân tích Frame {frame_idx} ---")
             found_ids = []
             
             for trk in tracker.tracks:
-                if trk.track_id in [191, 196]:
+                if trk.track_id in [2, 9]:
                     found_ids.append(trk.track_id)
                     if trk.state == 1: state_str = "TENTATIVE (Chờ duyệt)"
                     elif trk.state == 2: state_str = "CONFIRMED (Đang bám)"
@@ -111,7 +111,7 @@ def main():
                     print(f"      - Hộp dự đoán: X:{ukf_x:.1f}, Y:{ukf_y:.1f}, W:{ukf_w:.1f}, H:{ukf_h:.1f}")
                     print(f"      - Vận tốc: vx={vx:.2f}, vy={vy:.2f} | Cua(omega)={omega:.4f} | Giãn nở(vh)={vh:.2f}")
                     
-            for target_id in [191, 196]:
+            for target_id in [2, 9]:
                 if target_id not in found_ids:
                     print(f"  [!] ID: {target_id} | Đã BỊ XÓA HẲN khỏi bộ nhớ.")
         # =====================================================================

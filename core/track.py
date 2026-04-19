@@ -93,19 +93,30 @@ class Track:
         # 2. CẬP NHẬT REID (BẢO VỆ MÉP MÀN HÌNH)
         # ==========================================
         if detection_feature is not None:
+            # 1. Đưa tất cả vào trong block if để tránh lỗi UnboundLocalError
             x, y, w, h = detection_bbox
             margin = 15
-            is_truncated = (x < margin or y < margin or (x + w) > img_w - margin or (y + h) > img_h - margin)
             
-            if not is_truncated:
-                norm = np.linalg.norm(detection_feature)
-                if norm > 1e-6:
-                    detection_feature /= norm
-                
-                if not hasattr(self, 'smooth_feature') or self.smooth_feature is None:
-                    self.smooth_feature = detection_feature
+            # Logic khóa không gian: Chống đầu độc EMA
+            is_safe_inside = (x > margin and y > margin and 
+                              x + w < img_w - margin and 
+                              y + h < img_h - margin)
+                              
+            if is_safe_inside:
+                # 2. Chuẩn hóa vector đầu vào (L2 Normalization)
+                det_norm = np.linalg.norm(detection_feature)
+                if det_norm > 1e-6:
+                    detection_feature /= det_norm
+                    
+                if self.smooth_feature is None:
+                    # Dùng .copy() để tránh tham chiếu đè ô nhớ trong Python
+                    self.smooth_feature = detection_feature.copy() 
                 else:
-                    self.smooth_feature = 0.1 * detection_feature + 0.9 * self.smooth_feature
+                    # 3. Cập nhật EMA (Hệ số alpha = 0.9 nghĩa là bảo toàn 90% đặc trưng cũ)
+                    alpha = 0.9 
+                    self.smooth_feature = alpha * self.smooth_feature + (1 - alpha) * detection_feature
+                    
+                    # 4. Chuẩn hóa lại vector EMA sau khi cộng (Dùng max để chống chia cho 0)
                     self.smooth_feature /= max(np.linalg.norm(self.smooth_feature), 1e-6)
 
         self.hits += 1
