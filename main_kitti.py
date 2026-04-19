@@ -1,7 +1,6 @@
-import time
-import numpy as np
 import cv2
-
+import numpy as np
+import time
 from utils.kitti_parser import KittiParser
 from utils.visualizer import Visualizer
 from models.yolo_detector import YOLODetector
@@ -12,124 +11,91 @@ from core.cmc import SparseOpticalFlowCMC
 def main():
     print("=== PIPELINE: DEEPSORT + UKF + CMC (OOP REFACTORED) ===")
     
-    SCALE_FACTOR = 1.0 
-    NMS_THRESHOLD = 0.4 
     CONF_THRESHOLD = 0.6
-    FPS = 10 
+    FPS = 10
 
+    # Khởi tạo mô-đun với đường dẫn và cấu hình từ file cũ
     parser = KittiParser(seq_dir="datasets/KITTI_MOT/KITTI-0001")
     visualizer = Visualizer(output_path="outputs/videos/test_ukf_cmc.mp4", fps=FPS)
     
     detector = YOLODetector(model_path="weights/yolo11n_int8_openvino_model", conf_thresh=CONF_THRESHOLD)
-    reid_vehicle = ReIDExtractor(model_path="weights/public/vehicle-reid-0001/osnet_ain_x1_0_vehicle_reid.xml", device="CPU")
     reid_person = ReIDExtractor(model_path="weights/intel/person-reidentification-retail-0288/FP16/person-reidentification-retail-0288.xml", device="CPU")
+    reid_vehicle = ReIDExtractor(model_path="weights/public/vehicle-reid-0001/osnet_ain_x1_0_vehicle_reid.xml", device="CPU")
     
     cmc_engine = SparseOpticalFlowCMC()
-    
-    # KHỞI TẠO TRACKER CHÍNH THỐNG
-    tracker = Tracker(max_age=30, n_init=3, cosine_threshold=0.35, iou_threshold=0.7, fps=FPS)
-    
-    VEHICLE_CLASSES = [2, 3, 5, 7] 
-    
+    tracker = Tracker(max_age=30, n_init=3, cosine_threshold=0.35, high_thresh=CONF_THRESHOLD)
+
+    # Đo lường tổng thể
+    total_time = 0.0
+    frame_count = 0
+
     for frame_idx, image, _ in parser.get_frame():
-        frame_start_time = time.time()
+        start_time = time.perf_counter()
 
-        if SCALE_FACTOR != 1.0:
-            image = cv2.resize(image, (0, 0), fx=SCALE_FACTOR, fy=SCALE_FACTOR)
-            
-        img_h, img_w = image.shape[:2]
-            
-        # Bước 1: Tính CMC
-        t_cmc_start = time.time()
+        # 1. Bù trừ chuyển động nền (Camera Motion Compensation)
         H_camera = cmc_engine.apply(image)
-        cmc_time = (time.time() - t_cmc_start) * 1000
 
-        # Bước 2: Phát hiện vật thể (YOLO)
-        bboxes, confs, class_ids = detector.detect(image)
+        # 2. Xử lý nhận diện đối tượng
+        valid_bboxes, valid_confs, valid_class_ids = detector.detect(image)
         
-        # NMS Filter
-        valid_bboxes, valid_confs, valid_class_ids = [], [], []
-        if len(bboxes) > 0:
-            indices = cv2.dnn.NMSBoxes(bboxes, confs, score_threshold=CONF_THRESHOLD, nms_threshold=NMS_THRESHOLD)
-            if len(indices) > 0:
-                indices = indices.flatten() if hasattr(indices, 'flatten') else indices
-                for i in indices:
-                    valid_bboxes.append(bboxes[i])
-                    valid_confs.append(confs[i])
-                    valid_class_ids.append(class_ids[i])
-
-        # Bước 3: Trích xuất đặc trưng ReID (Đã phân loại Class)
-        t_reid_start = time.time()
-        features = []
+        # Khởi tạo mảng tính năng cho TẤT CẢ bounding boxes (bao gồm cả giá trị rỗng)
+        features = np.zeros((len(valid_bboxes), 512), dtype=np.float32)
         
-        if len(valid_bboxes) > 0:
-            for i, bbox in enumerate(valid_bboxes):
-                cls_id = valid_class_ids[i]
+        # 3. Phân chia chiến lược Trích xuất (BYTE-TRACK Logic) 
+        # Chỉ chạy mô hình sâu (Deep Model) trên các detections đạt độ tin cậy trên CONF_THRESHOLD
+        person_idx, vehicle_idx = [], []
+        person_bboxes, vehicle_bboxes = [], []
+        
+        for i, (bbox, conf, cls_id) in enumerate(zip(valid_bboxes, valid_confs, valid_class_ids)):
+            if conf >= CONF_THRESHOLD:
+                if cls_id == 0:  # Định danh Person
+                    person_idx.append(i)
+                    person_bboxes.append(bbox)
+                else:            # Định danh Vehicle
+                    vehicle_idx.append(i)
+                    vehicle_bboxes.append(bbox)
+                    
+        # Đẩy song song khối lượng lớn (Batch Execution)
+        if len(person_bboxes) > 0:
+            person_feats = reid_person.extract(image, person_bboxes)
+            for p_id, feat in zip(person_idx, person_feats):
+                # Padding zero nếu đặc trưng của person < 512 (đồng bộ với kích thước vector Tracker)
+                if feat.shape[0] < 512:
+                    feat = np.pad(feat, (0, 512 - feat.shape[0]), 'constant')
+                features[p_id] = feat
                 
-                # Trong YOLO (COCO dataset), class 0 là 'person'
-                if cls_id == 0:
-                    # Trích xuất đặc trưng người
-                    feat = reid_person.extract(image, np.array([bbox]))[0]
-                    # Đệm thêm zero để đồng nhất kích thước vector 512 của Tracker
-                    if feat.shape[0] < 512:
-                        feat = np.pad(feat, (0, 512 - feat.shape[0]), 'constant')
-                else:
-                    # Trích xuất đặc trưng xe cộ
-                    feat = reid_vehicle.extract(image, np.array([bbox]))[0]
-                    
-                features.append(feat)
-                
-            features = np.array(features, dtype=np.float32)
-        else:
-            features = np.zeros((0, 512), dtype=np.float32)
+        if len(vehicle_bboxes) > 0:
+            vehicle_feats = reid_vehicle.extract(image, vehicle_bboxes)
+            for v_id, feat in zip(vehicle_idx, vehicle_feats):
+                features[v_id] = feat
 
-        # Bước 4: Đẩy hết dữ liệu cho Tracker xử lý (Tracker tự làm 3 vòng match)
-        tracker.update(valid_bboxes, valid_confs, valid_class_ids, features, frame_shape=(img_h, img_w), H_camera=H_camera, frame_idx=frame_idx)
+        # 4. Cập nhật hệ thống Tracking 
+        tracker.update(valid_bboxes, valid_confs, valid_class_ids, features, 
+                       frame_shape=(image.shape[0], image.shape[1]), 
+                       H_camera=H_camera, frame_idx=frame_idx)
 
-        if 360 <= frame_idx <= 380:
-            print(f"--- Đang phân tích Frame {frame_idx} ---")
-            found_ids = []
-            
-            for trk in tracker.tracks:
-                if trk.track_id in [191, 196]:
-                    found_ids.append(trk.track_id)
-                    if trk.state == 1: state_str = "TENTATIVE (Chờ duyệt)"
-                    elif trk.state == 2: state_str = "CONFIRMED (Đang bám)"
-                    else: state_str = "DELETED (Đã xóa)"
-                    
-                    ukf_x, ukf_y, ukf_w, ukf_h = trk.to_tlwh()
-                    
-                    # Lấy thông tin động học (vận tốc) từ vector trạng thái của UKF
-                    # Vector x: [cx, cy, a, h, vx, vy, omega, vh]
-                    vx = trk.ukf.mean[4]
-                    vy = trk.ukf.mean[5]
-                    omega = trk.ukf.mean[6]
-                    vh = trk.ukf.mean[7]
-                    
-                    print(f"  [>] ID: {trk.track_id} | State: {state_str}")
-                    print(f"      - Mất dấu (Time since update): {trk.time_since_update} frames")
-                    print(f"      - Hộp dự đoán: X:{ukf_x:.1f}, Y:{ukf_y:.1f}, W:{ukf_w:.1f}, H:{ukf_h:.1f}")
-                    print(f"      - Vận tốc: vx={vx:.2f}, vy={vy:.2f} | Cua(omega)={omega:.4f} | Giãn nở(vh)={vh:.2f}")
-                    
-            for target_id in [191, 196]:
-                if target_id not in found_ids:
-                    print(f"  [!] ID: {target_id} | Đã BỊ XÓA HẲN khỏi bộ nhớ.")
-        # =====================================================================
-        
-        time_reid_total = (time.time() - t_reid_start) * 1000
-        fps = 1.0 / (time.time() - frame_start_time)
-        
-        # Bước 5: Lấy tọa độ và Vẽ
+        # 5. Phân giải và xuất kết quả
         draw_data = tracker.get_results()
-        drawn_img = visualizer.draw_tracks(image, draw_data, frame_idx)
         
-        print(f"Frame: {frame_idx:04d} | Object: {len(draw_data):02d} | CMC: {cmc_time:4.1f}ms | ReID: {time_reid_total:4.1f}ms | FPS: {fps:4.1f}")
+        # Dùng phương thức vẽ của file mới hoặc cũ tùy theo class Visualizer của bạn hỗ trợ tên hàm nào
+        vis_image = visualizer.draw(image, draw_data) if hasattr(visualizer, 'draw') else visualizer.draw_tracks(image, draw_data, frame_idx)
         
-        cv2.imshow("Test Pipeline UKF + CMC", drawn_img)
+        end_time = time.perf_counter()
+        total_time += (end_time - start_time)
+        frame_count += 1
+        
+        # Render FPS trên hình
+        fps_display = frame_count / total_time
+        cv2.putText(vis_image, f"FPS: {fps_display:.1f}", (20, 40), 
+                    cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255, 0), 2)
+        
+        cv2.imshow("Multi-Object Tracking KITTI", vis_image)
         if cv2.waitKey(1) & 0xFF == 27:
             break
 
-    visualizer.release()
+    # Dọn dẹp tài nguyên
+    if hasattr(visualizer, 'release'):
+        visualizer.release()
     cv2.destroyAllWindows()
     print("=== HOÀN THÀNH ===")
 

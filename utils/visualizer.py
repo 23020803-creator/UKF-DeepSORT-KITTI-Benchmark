@@ -35,8 +35,14 @@ class Visualizer:
 
         for track in active_tracks:
             # Giải nén đúng 10 phần tử từ tracker.py
-            track_id, class_id, ukf_x, ukf_y, ukf_w, ukf_h, yolo_x, yolo_y, yolo_w, yolo_h = track
-
+            # 1. Giải nén 3 giá trị chuẩn từ Tracker
+            tlwh, track_id, class_id = track
+        
+            # 2. Tách mảng tlwh thành 4 toạ độ UKF
+            ukf_x, ukf_y, ukf_w, ukf_h = tlwh
+        
+            # 3. Gán tạm tọa độ YOLO bằng tọa độ UKF để các hàm vẽ bên dưới (nếu có) không bị lỗi NameError
+            yolo_x, yolo_y, yolo_w, yolo_h = ukf_x, ukf_y, ukf_w, ukf_h
             track_id = int(track_id)
             class_id = int(class_id)
             color = self._get_color(track_id)

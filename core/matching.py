@@ -1,173 +1,132 @@
-# Toán học: Cosine Distance, IoU, Thuật toán Hungarian.
 import numpy as np
-from scipy.spatial.distance import cdist
+import scipy.spatial.distance
 from scipy.optimize import linear_sum_assignment
 import scipy.linalg
 
-def compute_cosine_distance(tracks, features_new):
-    """Tính khoảng cách Cosine từ Det mới tới Track (Đã tối ưu cho EMA)"""
-    if len(tracks) == 0 or len(features_new) == 0:
-        return np.empty((len(tracks), len(features_new)))
-    
-    # 1. Rút trích tất cả smooth_feature của các Track hiện tại thành ma trận (M, 512)
-    track_features = []
-    for track in tracks:
-        # Lấy feature, nếu bị None (do khởi tạo chưa có) thì dùng vector 0
-        feat = track.smooth_feature if (hasattr(track, 'smooth_feature') and track.smooth_feature is not None) else np.zeros(512)
-        track_features.append(feat)
-        
-    track_features = np.array(track_features)
-    
-    # 2. Tính toán Vectorized cực nhanh cho toàn bộ hệ thống
-    # cdist(M x 512, N x 512) -> Trả ra ma trận (M, N)
-    cost_matrix = cdist(track_features, features_new, metric='cosine')
-    
-    return cost_matrix
-
-def compute_iou_matrix(tracks, detections, img_w, img_h):
-    """Tính ma trận IoU có hỗ trợ Asymmetrical IoM khi xe chạm viền ảnh"""
+def compute_iou_matrix(tracks, detections):
     if len(tracks) == 0 or len(detections) == 0:
-        return np.zeros((len(tracks), len(detections)))
+        return np.zeros((len(tracks), len(detections)), dtype=np.float32)
     
-    cost_matrix = np.zeros((len(tracks), len(detections)))
+    cost_matrix = np.zeros((len(tracks), len(detections)), dtype=np.float32)
     for i, trk in enumerate(tracks):
-        box1 = trk.to_tlwh() # Box UKF dự đoán
+        trk_bbox = trk.ukf.x[:4]
+        trk_tlwh = _xyah_to_tlwh(trk_bbox)
         for j, det in enumerate(detections):
-            box2 = det.bbox # Box YOLO thực tế
-            
-            x_left, y_top = max(box1[0], box2[0]), max(box1[1], box2[1])
-            x_right, y_bottom = min(box1[0] + box1[2], box2[0] + box2[2]), min(box1[1] + box1[3], box2[1] + box2[3])
-            
-            if x_right < x_left or y_bottom < y_top:
-                cost_matrix[i, j] = 1.0
-                continue
-
-            intersection = (x_right - x_left) * (y_bottom - y_top)
-            area1, area2 = box1[2] * box1[3], box2[2] * box2[3]
-            iou = intersection / float(area1 + area2 - intersection + 1e-6)
-            
-            # --- ĐÃ SỬA: MỞ KHÓA LUẬT IOM CHO TOÀN MÀN HÌNH ---
-            # Bất kể xe bị che bởi lề ảnh hay bởi gốc cây giữa đường, 
-            # cứ giãn nở đột ngột là dùng IoM để cứu!
-            min_area = min(area1, area2)
-            iom = intersection / float(min_area + 1e-6)
-            
-            # Nếu box nhỏ nằm lọt thỏm > 80% trong box to -> Tha thứ sự giãn nở
-            if iom > 0.8:
-                best_metric = max(iou, iom)
-            else:
-                best_metric = iou 
-                
-            cost_matrix[i, j] = 1.0 - best_metric
-            
+            det_tlwh = det.tlwh
+            iou = _calculate_iou(trk_tlwh, det_tlwh)
+            cost_matrix[i, j] = 1.0 - iou
     return cost_matrix
 
-def linear_assignment(cost_matrix, tracks, detections, max_distance=0.2):
-    """
-    Giải quyết bài toán ghép cặp (Bipartite Matching) bằng thuật toán Hungarian.
+def compute_cosine_distance(tracks, detections):
+    if len(tracks) == 0 or len(detections) == 0:
+        return np.zeros((len(tracks), len(detections)), dtype=np.float32)
     
-    Thuật toán Hungarian (linear_sum_assignment) tìm ra cách ghép sao cho 
-    *tổng* chi phí của toàn bộ các cặp là nhỏ nhất (Global Optimum), 
-    thay vì ưu tiên ghép cặp có chi phí thấp nhất trước (Greedy).
+    trk_features = np.array([trk.smooth_feature for trk in tracks], dtype=np.float32)
+    det_features = np.array([det.feature for det in detections], dtype=np.float32)
     
-    Args:
-        cost_matrix: Ma trận (M, N) từ hàm compute_cosine_distance.
-        tracks: Danh sách đối tượng Track (M). Yêu cầu đối tượng có thuộc tính `class_id`.
-        detections: Danh sách đối tượng Detection (N). Yêu cầu đối tượng có thuộc tính `class_id`.
-        max_distance: Ngưỡng loại bỏ. Khoảng cách > max_distance sẽ không được ghép.
-        
-    Returns:
-        matches: List các tuple (track_idx, det_idx) ghép thành công.
-        unmatched_tracks: List các track_idx không ghép được.
-        unmatched_detections: List các det_idx mới tinh.
-    """
-    # Khởi tạo kết quả rỗng nếu ma trận trống
-    if cost_matrix.size == 0:
-        return [], list(range(len(tracks))), list(range(len(detections)))
-
-    # =========================================================================
-    # BƯỚC 1: COST GATING (LỌC THEO CLASS ID)
-    # Không bao giờ cho phép ghép khác loại (VD: Track là Người, Det là Xe máy).
-    # Gán chi phí vô cùng lớn để thuật toán Hungarian tự động né các cặp này.
-    # =========================================================================
-    INFTY_COST = 1e+5
-    for r, track in enumerate(tracks):
-        for c, det in enumerate(detections):
-            if track.class_id != det.class_id:
-                cost_matrix[r, c] = INFTY_COST
-
-    # =========================================================================
-    # BƯỚC 2: CHẠY THUẬT TOÁN HUNGARIAN
-    # Trả về 2 mảng: row_indices (Track) và col_indices (Detection)
-    # tương ứng với các cặp có tổng chi phí nhỏ nhất.
-    # =========================================================================
-    row_indices, col_indices = linear_sum_assignment(cost_matrix)
-
-    matches = []
-    unmatched_tracks = []
-    unmatched_detections = []
-
-    # =========================================================================
-    # BƯỚC 3: PHÂN LOẠI KẾT QUẢ VÀ ÁP DỤNG NGƯỠNG (MAX DISTANCE)
-    # =========================================================================
-    
-    # 3.1. Tìm các đối tượng bị thuật toán Hungarian bỏ rơi ngay từ đầu
-    # (Do số lượng M và N chênh lệch nhau)
-    unmatched_tracks = list(set(range(len(tracks))) - set(row_indices))
-    unmatched_detections = list(set(range(len(detections))) - set(col_indices))
-
-    # 3.2. Lọc lại các cặp Hungarian đã ghép xem có thỏa mãn ngưỡng không
-    for row, col in zip(row_indices, col_indices):
-        # Nếu chi phí > ngưỡng cho phép (hoặc chạm mức INFTY do sai Class ID)
-        if cost_matrix[row, col] > max_distance:
-            unmatched_tracks.append(row)
-            unmatched_detections.append(col)
-        else:
-            matches.append((row, col))
-
-    return matches, unmatched_tracks, unmatched_detections
+    # Vectorized cosine distance computation
+    cost_matrix = scipy.spatial.distance.cdist(trk_features, det_features, metric='cosine')
+    return cost_matrix
 
 def compute_mahalanobis_distance(tracks, detections):
-    """
-    Tính ma trận bình phương khoảng cách Mahalanobis (Dynamic Gating).
-    Trả về ma trận (M, N).
-    """
     if len(tracks) == 0 or len(detections) == 0:
-        return np.zeros((len(tracks), len(detections)))
+        return np.zeros((len(tracks), len(detections)), dtype=np.float32)
     
-    dist_matrix = np.zeros((len(tracks), len(detections)))
-    
+    cost_matrix = np.zeros((len(tracks), len(detections)), dtype=np.float32)
     for i, trk in enumerate(tracks):
-        # 1. Trích xuất không gian đo lường dự đoán
-        mean_proj = trk.ukf.mean[:4]       # [cx, cy, a, h]
-        P_proj = trk.ukf.covariance[:4, :4]  # Ma trận P 4x4
+        mean_proj = trk.ukf.x[:4]
+        P_proj = trk.ukf.P[:4, :4]
         
-        # 2. Tính ma trận nhiễu đo lường R (Đồng bộ với ukf.py)
-        h = max(trk.ukf.mean[3], 1.0)
-        std_pos = 0.02 * h
-        R = np.zeros((4, 4), dtype=np.float64)
-        R[0, 0] = R[1, 1] = R[3, 3] = std_pos ** 2
-        R[2, 2] = 1e-4
+        # mean_proj is [cx, cy, a, h], index 3 is height
+        h = max(mean_proj[3], 1.0) 
         
-        # 3. Tính Innovation Covariance S = P + R
+        std_pos = 0.05 * h
+        # NSA Noise Scaling is inherently handled inside track UKF update, 
+        # for Mahalanobis prediction we use the base measurement noise scale
+        R = np.diag([std_pos**2, std_pos**2, 1e-2, std_pos**2])
         S = P_proj + R
+        
         try:
-            # Dùng Cholesky decomposition để giải nghịch đảo ma trận an toàn & nhanh hơn
-            cholesky_factor = scipy.linalg.cho_factor(S)
-        except np.linalg.LinAlgError:
-            # Fallback an toàn nếu hệ không xác định dương (Positive-definite)
-            S = S + np.eye(4) * 1e-6
-            cholesky_factor = scipy.linalg.cho_factor(S)
+            cho_factor, lower = scipy.linalg.cho_factor(S, check_finite=False)
+        except scipy.linalg.LinAlgError:
+            S += np.eye(4) * 1e-6
+            cho_factor, lower = scipy.linalg.cho_factor(S, check_finite=False)
             
         for j, det in enumerate(detections):
-            # Biến đổi bbox YOLO về [cx, cy, a, h]
-            z = trk._tlwh_to_xyah(det.bbox)
+            z = det.xyah
             innovation = z - mean_proj
+            dist = scipy.linalg.cho_solve((cho_factor, lower), innovation, check_finite=False)
+            cost_matrix[i, j] = np.dot(innovation.T, dist)
+    
+    cost_matrix[np.isinf(cost_matrix)] = 1e5
+    return cost_matrix
+
+def fuse_score(cost_matrix, tracks, detections):
+    """ Dung hợp Cost Matrix theo kiểu BoT-SORT """
+    if cost_matrix.size == 0:
+        return cost_matrix
+    
+    iou_dist = compute_iou_matrix(tracks, detections)
+    # Gating ReID: Từ chối các kết nối có khoảng cách Cosine quá lớn
+    cost_matrix[cost_matrix > 0.35] = np.inf
+    # Sử dụng Minimum Fusion để giữ liên kết nếu một trong hai chỉ số (IoU hoặc Cosine) xuất sắc
+    fused_cost = np.minimum(cost_matrix, iou_dist)
+    return fused_cost
+
+def linear_assignment(cost_matrix, tracks, detections, max_distance=0.8):
+    if cost_matrix.size == 0:
+        return np.empty((0, 2), dtype=int), np.arange(len(tracks)), np.arange(len(detections))
+    
+    # Class ID Gating: Ép buộc cost = vô cực nếu khác lớp đối tượng
+    for i, trk in enumerate(tracks):
+        for j, det in enumerate(detections):
+            if trk.class_id != det.class_id:
+                cost_matrix[i, j] = np.inf
+                
+    # === SỬA LỖI INFEASIBLE TRIỆT ĐỂ Ở ĐÂY ===
+    # Quét sạch toàn bộ NaN, Inf, -Inf do lỗi chia cho 0 (từ ReID hoặc IoU)
+    cost_matrix = np.nan_to_num(cost_matrix, nan=1e5, posinf=1e5, neginf=1e5)
+    # =========================================
+                
+    row_ind, col_ind = linear_sum_assignment(cost_matrix)
+    
+    matches, unmatched_tracks, unmatched_detections = [], [], []
+    
+    for i in range(len(tracks)):
+        if i not in row_ind:
+            unmatched_tracks.append(i)
+    for j in range(len(detections)):
+        if j not in col_ind:
+            unmatched_detections.append(j)
             
-            # Tính D^2 = innovation^T * S^-1 * innovation
-            y = scipy.linalg.cho_solve(cholesky_factor, innovation)
-            sq_maha_dist = np.dot(innovation, y)
+    for r, c in zip(row_ind, col_ind):
+        if cost_matrix[r, c] > max_distance:
+            unmatched_tracks.append(r)
+            unmatched_detections.append(c)
+        else:
+            matches.append((r, c))
             
-            dist_matrix[i, j] = sq_maha_dist
-            
-    return dist_matrix
+    return np.array(matches), np.array(unmatched_tracks), np.array(unmatched_detections)
+
+def _xyah_to_tlwh(xyah):
+    """ Chuyển đổi từ [center_x, center_y, aspect_ratio, height] sang [top_left_x, top_left_y, width, height] """
+    ret = np.asarray(xyah).copy()
+    ret[2] *= ret[3]          # width = aspect_ratio * height
+    ret[0] -= ret[2] / 2.0    # top_left_x = center_x - width/2
+    ret[1] -= ret[3] / 2.0    # top_left_y = center_y - height/2
+    return ret
+
+def _calculate_iou(box1, box2):
+    """ Tính IoU của 2 bounding box format [top_left_x, top_left_y, width, height] """
+    x1 = max(box1[0], box2[0])
+    y1 = max(box1[1], box2[1])
+    x2 = min(box1[0] + box1[2], box2[0] + box2[2])
+    y2 = min(box1[1] + box1[3], box2[1] + box2[3])
+    
+    inter_area = max(0, x2 - x1) * max(0, y2 - y1)
+    
+    box1_area = box1[2] * box1[3]
+    box2_area = box2[2] * box2[3]
+    
+    iou = inter_area / float(box1_area + box2_area - inter_area + 1e-6)
+    return iou

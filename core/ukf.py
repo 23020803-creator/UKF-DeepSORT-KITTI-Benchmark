@@ -1,140 +1,109 @@
 import numpy as np
-from filterpy.kalman import UnscentedKalmanFilter as FilterUKF
-from filterpy.kalman import MerweScaledSigmaPoints
 import cv2
+from filterpy.kalman import UnscentedKalmanFilter, MerweScaledSigmaPoints
+
+def fx(x, dt):
+    """ Mô hình động học Constant Turn Rate and Velocity (CTRV) """
+    x_out = np.copy(x)
+    cx, cy, a, h, vx, vy, omega, vh = x
+    
+    if abs(omega) < 1e-4:
+        x_out[0] = cx + vx * dt
+        x_out[1] = cy + vy * dt
+    else:
+        x_out[0] = cx + (vx * np.sin(omega * dt) - vy * (1 - np.cos(omega * dt))) / omega
+        x_out[1] = cy + (vx * (1 - np.cos(omega * dt)) + vy * np.sin(omega * dt)) / omega
+        
+    x_out[3] = h + vh * dt
+    # Vận tốc xoay chuyển theo tốc độ góc omega
+    x_out[4] = vx * np.cos(omega * dt) - vy * np.sin(omega * dt)
+    x_out[5] = vx * np.sin(omega * dt) + vy * np.cos(omega * dt)
+    return x_out
+
+def hx(x):
+    # Trích xuất không gian đo lường [cx, cy, a, h]
+    return x[:4]
 
 class TrackUKF:
-    def __init__(self, fps=10):
-        self.dt = 1.0 / float(fps)
+    def __init__(self, measurement):
+        points = MerweScaledSigmaPoints(n=8, alpha=0.1, beta=2., kappa=-5)
+        self.ukf = UnscentedKalmanFilter(dim_x=8, dim_z=4, dt=1.0, hx=hx, fx=fx, points=points)
         
-        def transition_function(x, dt):
-            # Trạng thái x: [cx, cy, a, h, vx, vy, omega, vh]
-            cx, cy, a, h, vx, vy, omega, vh = x
-            
-            # Tránh chia cho 0 khi xe đi thẳng (omega quá nhỏ)
-            if abs(omega) < 1e-4:
-                cx_new = cx + vx * dt
-                cy_new = cy + vy * dt
-                vx_new = vx
-                vy_new = vy
-            else:
-                # Quỹ đạo vòng cung (Khúc cua)
-                cx_new = cx + (vx / omega) * np.sin(omega * dt) - (vy / omega) * (1 - np.cos(omega * dt))
-                cy_new = cy + (vx / omega) * (1 - np.cos(omega * dt)) + (vy / omega) * np.sin(omega * dt)
-                
-                # Vận tốc bị xoay đi một góc omega * dt
-                vx_new = vx * np.cos(omega * dt) - vy * np.sin(omega * dt)
-                vy_new = vx * np.sin(omega * dt) + vy * np.cos(omega * dt)
-                
-            # Các thông số kích thước hộp (a, h) giả định tuyến tính
-            a_new = a
-            h_new = h + vh * dt
-            
-            return np.array([cx_new, cy_new, a_new, h_new, vx_new, vy_new, omega, vh], dtype=np.float64)
+        self.ukf.x = np.zeros(8)
+        self.ukf.x[:4] = measurement
+        
+        h = max(measurement[3], 10.0)
+        # Giảm quy mô nhiễu khởi tạo vận tốc để chống vọt lố (Overshoot)
+        self.ukf.P = np.diag([
+            (0.1 * h)**2, (0.1 * h)**2, 1e-2, (0.1 * h)**2,
+            (0.05 * h)**2, (0.05 * h)**2, 1e-4, (0.01 * h)**2
+        ])
 
-        def measurement_function(x):
-            return x[:4]
+    @property
+    def x(self):
+        return self.ukf.x
+        
+    @property
+    def P(self):
+        return self.ukf.P
 
-        sigmas = MerweScaledSigmaPoints(n=8, alpha=0.3, beta=2., kappa=0)
-
-        self.ukf = FilterUKF(
-            dim_x=8, dim_z=4, dt=self.dt, 
-            fx=transition_function, 
-            hx=measurement_function, 
-            points=sigmas
-        )
-
-    def _enforce_spd(self, matrix, min_eig=1e-5):
+    def _enforce_spd(self, matrix):
+        """ Ép buộc ma trận về trạng thái Symmetric Positive Definite """
         matrix = (matrix + matrix.T) / 2.0
-        try:
-            eigvals, eigvecs = np.linalg.eigh(matrix)
-            eigvals = np.maximum(eigvals, min_eig)
-            return eigvecs @ np.diag(eigvals) @ eigvecs.T
-        except:
-            return matrix + np.eye(matrix.shape[0]) * min_eig
+        eigvals, eigvecs = np.linalg.eigh(matrix)
+        eigvals = np.maximum(eigvals, 1e-6)
+        return eigvecs @ np.diag(eigvals) @ eigvecs.T
 
-    def initiate(self, measurement):
-        meas = np.asarray(measurement, dtype=np.float64).ravel()
-        mean = np.zeros(8, dtype=np.float64)
-        mean[:4] = meas
-        
-        h = meas[3]
-        covariance = np.zeros((8, 8), dtype=np.float64)
-        
-        # 1. Độ bất định vị trí: Cho phép sai số nhỏ (tin tưởng hờ vào vị trí khởi tạo)
-        covariance[0, 0] = covariance[1, 1] = covariance[3, 3] = (0.1 * h) ** 2
-        covariance[2, 2] = 1e-2
-        
-        self.ukf.P[4, 4] = self.ukf.P[5, 5] = self.ukf.P[7, 7] = (10.0 * h) ** 2
-        self.ukf.P[6, 6] = 1e-2
-        
-        self.ukf.x = mean
-        self.ukf.P = self._enforce_spd(covariance)
-
-    def _get_dynamic_Q(self, h):
-        std_pos = 0.05 * h
-        std_vel = 0.5 * h  # GIỮ NGUYÊN: Đủ lớn để hệ thống phản ứng với ma trận kéo lùi của CMC
-        
-        Q = np.zeros((8, 8), dtype=np.float64)
-        Q[0, 0] = Q[1, 1] = Q[3, 3] = std_pos ** 2
-        Q[2, 2] = 1e-4
-        
-        Q[4, 4] = Q[5, 5] = Q[7, 7] = std_vel ** 2
-        Q[6, 6] = 1e-4
-        
-        return self._enforce_spd(Q)
-
-    def update(self, measurement):
-        h = max(self.ukf.x[3], 1.0)
-        # GIỮ NGUYÊN: Ép hệ thống tin tưởng tuyệt đối vào tọa độ YOLO
-        std_pos = 0.02 * h 
-        
-        R = np.zeros((4, 4), dtype=np.float64)
-        R[0, 0] = R[1, 1] = R[3, 3] = std_pos ** 2
-        R[2, 2] = 1e-4
-        
-        self.ukf.R = self._enforce_spd(R)
-        self.ukf.update(np.asarray(measurement, dtype=np.float64))
-        self.ukf.P = self._enforce_spd(self.ukf.P)
+    def _get_dynamic_Q(self, x):
+        h = max(x[3], 10.0)
+        # Nhiễu hệ thống Q tỷ lệ với độ lớn của vật thể
+        Q = np.diag([
+            (0.05 * h)**2, (0.05 * h)**2, 1e-4, (0.05 * h)**2,
+            (0.02 * h)**2, (0.02 * h)**2, 1e-4, (0.01 * h)**2
+        ])
+        return Q
 
     def predict(self, H_camera=None):
         if H_camera is not None:
+            # BoT-SORT CMC Integration [12]
+            M = H_camera[:, :2]  # Rotation / Scale Matrix 2x2
+            T = H_camera[:, 2]   # Translation vector 2x1
+
+            # 1. Biến đổi Vị trí Trung tâm [cx, cy]
             pos = self.ukf.x[:2].reshape(1, 1, 2)
             self.ukf.x[:2] = cv2.transform(pos, H_camera).ravel()
 
-            R2x2 = H_camera[:, :2]
-            scale = np.sqrt(abs(np.linalg.det(R2x2)))
-            R_rot_only = R2x2 / (scale + 1e-6) 
-            
-            self.ukf.x[4:6] = R_rot_only @ self.ukf.x[4:6]
-            
-            self.ukf.x[3] *= scale
-            self.ukf.x[7] *= scale
+            # 2. Biến đổi Vận tốc [vx, vy] (Tuyệt đối không cộng thêm vector Tịnh tiến T)
+            self.ukf.x[4:6] = M @ self.ukf.x[4:6]
 
-            self.ukf.P[:2, :2] = R2x2 @ self.ukf.P[:2, :2] @ R2x2.T
-            self.ukf.P[4:6, 4:6] = R_rot_only @ self.ukf.P[4:6, 4:6] @ R_rot_only.T
+            # 3. Biến đổi Toàn vẹn Ma trận Hiệp phương sai P (8x8)
+            # Thay vì chỉ cập nhật khối 2x2 như cũ, phải tái cấu trúc chéo để không phá vỡ liên kết vật lý
+            M_8x8 = np.eye(8)
+            M_8x8[0:2, 0:2] = M
+            M_8x8[4:6, 4:6] = M
+            self.ukf.P = M_8x8 @ self.ukf.P @ M_8x8.T
 
         self.ukf.P = self._enforce_spd(self.ukf.P)
-        self.ukf.Q = self._get_dynamic_Q(self.ukf.x[3])
+        self.ukf.Q = self._get_dynamic_Q(self.ukf.x)
         self.ukf.predict()
         self.ukf.P = self._enforce_spd(self.ukf.P)
 
-    def update(self, measurement):
-        h = max(self.ukf.x[3], 1.0)
-        std_pos = 0.05 * h # Mức độ tin tưởng YOLO tiêu chuẩn
+    def update(self, measurement, confidence=1.0):
+        h = max(self.ukf.x[3], 10.0)
+        std_pos = 0.05 * h
         
-        R = np.zeros((4, 4), dtype=np.float64)
-        R[0, 0] = R[1, 1] = R[3, 3] = std_pos ** 2
-        R[2, 2] = 1e-2 
+        # KIẾN TRÚC NSA-KALMAN :
+        # Nếu YOLO rất tự tin (confidence tiến gần 1), noise_scale tiến về 0.05, 
+        # bộ lọc sẽ bị ép phải cập nhật trạng thái sát với bounding box thực tế.
+        noise_scale = max(1.0 - confidence, 0.05)
+        
+        R = np.diag([
+            (std_pos * noise_scale)**2, 
+            (std_pos * noise_scale)**2, 
+            (1e-2 * noise_scale)**2, 
+            (std_pos * noise_scale)**2
+        ])
         
         self.ukf.R = self._enforce_spd(R)
         self.ukf.update(np.asarray(measurement, dtype=np.float64))
         self.ukf.P = self._enforce_spd(self.ukf.P)
-        
-    @property
-    def mean(self):
-        return self.ukf.x
-
-    @property
-    def covariance(self):
-        return self.ukf.P
