@@ -3,6 +3,15 @@ from core.track import Track, TrackState
 from core import matching
 
 class Detection:
+    """
+    Đại diện cho một kết quả nhận diện từ mô hình Detection (ví dụ: YOLO).
+    
+    Attributes:
+        bbox (numpy.ndarray): Tọa độ hộp bao định dạng [x_top_left, y_top_left, width, height].
+        conf (float): Độ tự tin (confidence score) của nhận diện.
+        class_id (int): Nhãn phân loại của đối tượng.
+        feature (numpy.ndarray, optional): Vector đặc trưng ngoại hình từ mô hình ReID.
+    """
     def __init__(self, bbox, conf, class_id, feature=None):
         self.bbox = np.asarray(bbox, dtype=np.float32)
         self.conf = float(conf)
@@ -10,7 +19,21 @@ class Detection:
         self.feature = feature
 
 class Tracker:
+    """
+    Lớp Tracker cốt lõi quản lý vòng đời của nhiều quỹ đạo (Tracks) và 
+    thực hiện việc liên kết dữ liệu (Data Association) thông qua 3 vòng lặp.
+    """
     def __init__(self, max_age=30, n_init=3, cosine_threshold=0.35, iou_threshold=0.7, fps=10):
+        """
+        Khởi tạo hệ thống Tracker.
+
+        Args:
+            max_age (int): Số khung hình tối đa một quỹ đạo được giữ lại khi mất dấu trước khi bị xóa.
+            n_init (int): Số khung hình liên tiếp cần thiết để xác nhận một quỹ đạo (từ TENTATIVE -> CONFIRMED).
+            cosine_threshold (float): Ngưỡng khoảng cách Cosine tối đa cho phép ghép cặp ở vòng 1.
+            iou_threshold (float): Ngưỡng IoU tối đa (biểu diễn dưới dạng 1 - IoU) cho phép ghép cặp ở vòng 2.
+            fps (int): Tốc độ khung hình để khởi tạo bộ lọc UKF.
+        """
         self.max_age = max_age
         self.n_init = n_init
         self.cosine_threshold = cosine_threshold
@@ -20,6 +43,18 @@ class Tracker:
         self.next_id = 1
 
     def update(self, bboxes, confs, class_ids, features, frame_shape, H_camera=None, frame_idx=0):
+        """
+        Hàm chính thực hiện quy trình cập nhật quỹ đạo: Dự đoán -> Cắt tỉa -> Liên kết 3 vòng -> Quản lý vòng đời.
+
+        Args:
+            bboxes (list): Danh sách tọa độ hộp bao nhận diện được trong khung hình hiện tại.
+            confs (list): Danh sách độ tự tin tương ứng với bboxes.
+            class_ids (list): Danh sách nhãn phân loại tương ứng với bboxes.
+            features (list): Danh sách vector đặc trưng ReID tương ứng.
+            frame_shape (tuple): Kích thước khung hình (chiều cao, chiều rộng).
+            H_camera (numpy.ndarray, optional): Ma trận biến đổi Affine bù trừ chuyển động camera (CMC).
+            frame_idx (int): Số thứ tự khung hình hiện tại (dùng để log/debug).
+        """
         img_h, img_w = frame_shape
         
         # ====================================================================
@@ -122,9 +157,19 @@ class Tracker:
             # Chạy thuật toán Hungarian trên ma trận đã được thêm các "chốt chặn"
             matches, un_t, un_d = matching.linear_assignment(cost_matrix, level_tracks, level_dets, 1.0)
 
+            for trk_i, det_i in matches:
+                matched_v1.append((level_trk_idx[trk_i], unmatched_dets_idx[det_i]))
+
         for trk_i, det_i in matched_v1:
             self.tracks[trk_i].update(valid_dets[det_i].bbox, valid_dets[det_i].feature, img_w, img_h)
             unmatched_trks_idx.remove(trk_i)
+            # Remove det_i from unmatched_dets_idx. We need to be careful as unmatched_dets_idx is a list of indices relative to valid_dets.
+            # matched_v1 stores the actual indices in self.tracks and valid_dets.
+            # However, the loop structure above makes removing from unmatched_dets_idx tricky if not done carefully.
+            # The original code lacked the removal of det_i from unmatched_dets_idx after loop.
+            # Fixing the logic:
+            if det_i in unmatched_dets_idx:
+                 unmatched_dets_idx.remove(det_i)
 
         # ====================================================================
         # VÒNG 2: IOU MATCHING (Dùng box UKF dự đoán)
@@ -300,6 +345,13 @@ class Tracker:
         self.tracks = [t for t in self.tracks if not t.is_deleted()]
 
     def get_results(self):
+        """
+        Trích xuất kết quả tracking cuối cùng của khung hình hiện tại.
+
+        Returns:
+            list: Danh sách các tuple đại diện cho mỗi quỹ đạo hợp lệ. 
+                Định dạng: (track_id, class_id, ukf_x, ukf_y, ukf_w, ukf_h, yolo_x, yolo_y, yolo_w, yolo_h)
+        """
         # Trả về tuple 10 phần tử: (track_id, class_id, ukf_x, ukf_y, ukf_w, ukf_h, yolo_x, yolo_y, yolo_w, yolo_h)
         results = []
         for t in self.tracks:

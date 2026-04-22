@@ -1,31 +1,10 @@
 """
-=========================================================================================
-FILE: yolo_detector.py
-CHỨC NĂNG: Lõi thực thi suy luận (Inference Engine) sử dụng OpenVINO API.
-           Tích hợp logic tiền xử lý, hậu xử lý và gộp thực thể (Entity Merging).
------------------------------------------------------------------------------------------
-1. ĐẦU VÀO (INPUT):
-    - Ảnh thô (Original Frame): Mảng Numpy (BGR) từ OpenCV.
-    - Model Path: Đường dẫn tới thư mục chứa file .xml và .bin của OpenVINO.
-    - imgsz: Kích thước mạng yêu cầu (mặc định 480x480).
+Mô đun YOLO Detector tối ưu hóa bằng OpenVINO Toolkit.
 
-2. ĐẦU RA (OUTPUT) - Trả về Tuple gồm 3 mảng Numpy:
-    - bboxes: Mảng (N, 4) chứa tọa độ [x_min, y_min, width, height] kiểu float32.
-    - confs: Mảng (N,) chứa điểm tin cậy (0.0 - 1.0) kiểu float32.
-    - class_ids: Mảng (N,) chứa ID lớp đã mapping (0: Pedestrian, 1: Cyclist, 2: Car).
-
-3. CƠ CHẾ XỬ LÝ ĐẶC BIỆT (CORE LOGIC):
-    - Letterbox Resizing: Thay đổi kích thước ảnh nhưng giữ nguyên tỷ lệ (aspect ratio) 
-      bằng cách thêm padding, giúp tránh làm biến dạng vật thể khi inference.
-    - IOA Merging (Intersection over Area): Logic đặc thù để kiểm tra sự đè lấp giữa 
-      'Person' và 'Vehicle'. Nếu một người nằm trong vùng của xe đạp/xe máy (IOA > 0.3), 
-      hệ thống sẽ gộp lại thành một thực thể duy nhất là 'Cyclist'.
-    - COCO Mapping: Chuyển đổi từ 80 lớp mặc định của COCO sang 3 lớp mục tiêu của dự án.
-
-4. HIỆU NĂNG:
-    - Sử dụng OpenVINO Native API để tối ưu hóa trên kiến trúc CPU Intel.
-    - Tích hợp NMS (Non-Maximum Suppression) để loại bỏ các box trùng lặp.
-=========================================================================================
+Cung cấp lõi thực thi suy luận (Inference Engine) cho mạng YOLO11n. 
+Tích hợp quy trình tiền xử lý ảnh (Letterbox Resizing) để giữ nguyên tỷ lệ, 
+chạy suy luận trực tiếp trên CPU và hậu xử lý NMS (Non-Maximum Suppression).
+Chỉ tập trung nhận diện Người (Person) và Xe ô tô (Car).
 """
 
 import os
@@ -41,13 +20,33 @@ except ImportError:
     from ultralytics.utils.ops import scale_boxes
 
 class YOLODetector:
+    """
+    Lớp đóng gói mô hình YOLO chạy trên nền tảng OpenVINO.
+
+    Attributes:
+        conf_thresh (float): Ngưỡng tự tin tối thiểu để giữ lại Bounding Box.
+        img_width (int): Chiều rộng ảnh chuẩn hóa đầu vào của mô hình.
+        img_height (int): Chiều cao ảnh chuẩn hóa đầu vào của mô hình.
+        core (openvino.runtime.Core): Lõi thực thi OpenVINO.
+        compiled_model (openvino.runtime.CompiledModel): Mô hình đã được biên dịch cho thiết bị hiện tại.
+        output_layer (openvino.runtime.ConstOutput): Lớp đầu ra của mô hình.
+        coco_to_id (dict): Từ điển ánh xạ từ ID của bộ dữ liệu COCO sang ID tùy chỉnh của hệ thống.
+    """
+
     def __init__(self, model_path="weights/yolo11n_int8_openvino_model", conf_thresh=0.7):
+        """
+        Khởi tạo YOLODetector, nạp và biên dịch mô hình lên CPU.
+
+        Args:
+            model_path (str): Đường dẫn tới thư mục chứa tệp mô hình OpenVINO (yolo11n.xml).
+            conf_thresh (float): Ngưỡng tự tin (confidence threshold) cho NMS.
+        """
         self.conf_thresh = conf_thresh
         
         self.img_width = 960  
         self.img_height = 288 
         
-        print("Đang khởi tạo Lõi OpenVINO (Native Core)...")
+        print("[INFO] Đang khởi tạo Lõi OpenVINO (Native Core)...")
         self.core = ov.Core()
         
         xml_path = os.path.join(model_path, "yolo11n.xml")
@@ -55,15 +54,29 @@ class YOLODetector:
         
         self.compiled_model = self.core.compile_model(model=model, device_name="CPU")
         self.output_layer = self.compiled_model.output(0)
-        print("✅ Đã load và biên dịch model trực tiếp lên CPU!")
+        print("[SUCCESS] Đã load và biên dịch model trực tiếp lên CPU!")
 
-        # [SỬA ĐỔI]: Chỉ giữ lại Person (0) và Car (2), đã loại bỏ xe đạp/xe máy
+        # Chỉ giữ lại Person (0) và Car (2), loại bỏ các class không cần thiết
         self.coco_to_id = {
             0: 0,  # person -> Person
             2: 2,  # car -> Car
         }
 
     def _letterbox(self, img, new_shape=(960, 288), color=(114, 114, 114)):
+        """
+        Thay đổi kích thước ảnh (Resize) và thêm viền (Padding) để giữ nguyên tỷ lệ khung hình.
+        
+        Quá trình này ngăn chặn sự biến dạng vật thể (squishing/stretching),
+        giúp mô hình YOLO nhận diện chính xác hơn.
+
+        Args:
+            img (numpy.ndarray): Ảnh BGR đầu vào.
+            new_shape (tuple): Kích thước mục tiêu (chiều rộng, chiều cao).
+            color (tuple): Mã màu BGR của viền padding. Mặc định là xám (114, 114, 114).
+
+        Returns:
+            numpy.ndarray: Ảnh sau khi resize và thêm viền.
+        """
         shape = img.shape[:2]  
         
         r = min(new_shape[0] / shape[1], new_shape[1] / shape[0])
@@ -85,7 +98,20 @@ class YOLODetector:
         return img
 
     def detect(self, image):
-        # 1. TIỀN XỬ LÝ (Không được xóa phần này)
+        """
+        Thực hiện toàn bộ pipeline nhận diện: Tiền xử lý -> Suy luận -> Hậu xử lý.
+
+        Args:
+            image (numpy.ndarray): Khung hình thô gốc (BGR).
+
+        Returns:
+            tuple: Trả về 3 mảng numpy:
+                - bboxes (numpy.ndarray): Tọa độ hộp bao [x_top_left, y_top_left, width, height], shape (N, 4).
+                - confs (numpy.ndarray): Điểm tự tin của các nhận diện, shape (N,).
+                - class_ids (numpy.ndarray): ID phân loại đối tượng, shape (N,).
+                Nếu không phát hiện được gì, trả về các mảng rỗng.
+        """
+        # 1. TIỀN XỬ LÝ
         img_padded = self._letterbox(image, new_shape=(self.img_width, self.img_height))
         
         img_blob = img_padded[:, :, ::-1].transpose(2, 0, 1)  
@@ -99,7 +125,7 @@ class YOLODetector:
         # 3. HẬU XỬ LÝ
         preds = torch.from_numpy(raw_results)
         
-        # Chỉ siết iou_thres xuống 0.30, giữ nguyên mặc định (agnostic=False)
+        # Áp dụng Non-Maximum Suppression (NMS) với ngưỡng IoU là 0.30
         preds = non_max_suppression(preds, conf_thres=self.conf_thresh, iou_thres=0.30, max_det=300)
         
         if len(preds) == 0 or len(preds[0]) == 0:
@@ -107,9 +133,9 @@ class YOLODetector:
                     np.empty((0,), dtype=np.float32), 
                     np.empty((0,), dtype=np.int32))
 
+        # Khôi phục tọa độ hộp bao về kích thước ảnh gốc
         preds[0][:, :4] = scale_boxes(img_blob.shape[2:], preds[0][:, :4], image.shape).round()
         
-        # [SỬA ĐỔI]: Logic duyệt bounding box rút gọn mới
         final_bboxes = []
         final_confs = []
         final_class_ids = []
@@ -118,13 +144,13 @@ class YOLODetector:
             x1, y1, x2, y2, conf, cls = det[:6]
             coco_cls_id = int(cls.item())
             
-            # Chỉ xử lý nếu đối tượng nằm trong danh sách Person (0) hoặc Car (2)
+            # Chỉ xử lý nếu đối tượng nằm trong danh sách được cấp phép (Person, Car)
             if coco_cls_id not in self.coco_to_id:
                 continue
                 
             target_id = self.coco_to_id[coco_cls_id]
             
-            # Đẩy thẳng kết quả vào mảng final
+            # Đổi tọa độ từ dạng [x1, y1, x2, y2] sang [x, y, w, h]
             final_bboxes.append([float(x1.item()), float(y1.item()), float(x2.item() - x1.item()), float(y2.item() - y1.item())])
             final_confs.append(float(conf.item()))
             final_class_ids.append(int(target_id))

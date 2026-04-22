@@ -80,7 +80,7 @@ def run_fps_test_and_save_video(video_path, model_name="yolo11n_int8_openvino_mo
         frame_count += 1
         
         start_time = time.perf_counter()
-        bboxes, confs, class_ids = detector.detect(frame, imgsz=480)
+        bboxes, confs, class_ids = detector.detect(frame)
         end_time = time.perf_counter()
         
         process_time = end_time - start_time

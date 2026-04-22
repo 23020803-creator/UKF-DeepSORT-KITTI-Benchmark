@@ -1,10 +1,39 @@
-import os  # SỬA: Đưa import os lên đỉnh file theo chuẩn PEP-8
+"""
+Mô đun cung cấp công cụ trực quan hóa (Visualizer) cho hệ thống Tracking.
+
+Mô đun này chứa lớp Visualizer giúp vẽ các hộp bao dự đoán (bounding boxes), thông tin 
+định danh (ID), tên phân lớp đối tượng (class name), đồng thời hỗ trợ ghi chuỗi 
+khung hình kết quả thành tệp video hoàn chỉnh (.mp4).
+"""
+
+import os
 import cv2
 import numpy as np
 
 class Visualizer:
-    """ Class hỗ trợ vẽ bounding box, ID, tên class và lưu video kết quả."""
+    """
+    Lớp hỗ trợ trực quan hóa kết quả theo dõi đa đối tượng và lưu xuất video.
+
+    Attributes:
+        output_path (str): Đường dẫn lưu tệp video kết quả đầu ra.
+        fps (int): Tốc độ khung hình (Frames Per Second) của video đầu ra.
+        writer (cv2.VideoWriter): Đối tượng ghi video của thư viện OpenCV.
+        colors_palette (numpy.ndarray): Mảng chứa 1000 mã màu ngẫu nhiên nhưng cố định 
+            được cấp phát trước cho các ID nhằm đảm bảo tính nhất quán.
+        class_names (dict): Từ điển ánh xạ từ Class ID sang chuỗi tên đối tượng.
+    """
+    
     def __init__(self, output_path="outputs/videos/results.mp4", fps=30):
+        """
+        Khởi tạo đối tượng Visualizer.
+
+        Tạo trước một bảng màu chuẩn ngẫu nhiên từ hạt giống (seed) cố định để 
+        đảm bảo màu sắc của các ID không bị thay đổi giữa các lần chạy.
+
+        Args:
+            output_path (str, optional): Đường dẫn tệp video kết quả. Mặc định "outputs/videos/results.mp4".
+            fps (int, optional): Tốc độ ghi khung hình cho video xuất ra. Mặc định là 30.
+        """
         self.output_path = output_path
         self.fps = fps
         self.writer = None
@@ -17,9 +46,17 @@ class Visualizer:
         self.class_names = {0: "Person", 1: "Cyclist", 2: "Car"}
 
     def _get_color(self, track_id):
-        """ 
-        Lấy màu ngẫu nhiên nhưng cố định cho từng ID. 
-        Xe ID số 5 sẽ luôn có màu xanh, dù xuất hiện ở bất kỳ frame nào.
+        """
+        Lấy mã màu ngẫu nhiên nhưng cố định cho từng định danh (ID).
+
+        Đảm bảo một đối tượng cụ thể (ví dụ: Xe ID số 5) sẽ luôn giữ đúng một 
+        màu sắc xuyên suốt toàn bộ quá trình xuất hiện trong video.
+
+        Args:
+            track_id (int): Định danh (ID) duy nhất của đối tượng Tracking.
+
+        Returns:
+            tuple: Bộ 3 giá trị nguyên (B, G, R) biểu diễn màu sắc chuẩn của OpenCV.
         """
         idx = int(track_id) % 1000
         color = self.colors_palette[idx]
@@ -27,6 +64,22 @@ class Visualizer:
         return (int(color[0]), int(color[1]), int(color[2]))
 
     def draw_tracks(self, image, active_tracks, frame_idx=0):
+        """
+        Vẽ các quỹ đạo đang hoạt động (active tracks) lên khung hình hiện tại.
+
+        Thực hiện vẽ hai lớp thông tin: hộp bao thô từ YOLO (mỏng, màu vàng) nếu có 
+        dữ liệu, và hộp bao dự đoán của UKF (đậm, theo màu ID) đè lên trên cùng 
+        thông tin định danh. Tự động khởi tạo VideoWriter và ghi khung hình.
+
+        Args:
+            image (numpy.ndarray): Khung hình ảnh gốc (BGR).
+            active_tracks (list): Danh sách các quỹ đạo. Mỗi phần tử là một tuple chứa 
+                10 thông số: (track_id, class_id, ukf_x, ukf_y, ukf_w, ukf_h, yolo_x, yolo_y, yolo_w, yolo_h).
+            frame_idx (int, optional): Số thứ tự khung hình hiện tại. Mặc định là 0.
+
+        Returns:
+            numpy.ndarray: Khung hình đã được vẽ đè các thông tin trực quan.
+        """
         drawn_image = image.copy()
         h_img, w_img = drawn_image.shape[:2]
 
@@ -80,8 +133,19 @@ class Visualizer:
     
     def draw_raw_detections(self, image, detections, frame_idx=0):
         """
-        Vẽ các bounding box thô từ YOLO (trước khi qua Kalman Filter).
-        Dùng để Test hệ thống nhận diện độc lập xem có nhạy không.
+        Vẽ các hộp nhận diện (bounding box) thô trực tiếp từ YOLO.
+
+        Chức năng này bỏ qua quá trình của bộ lọc Kalman, thường được dùng để 
+        kiểm thử (debug) hoặc đánh giá độ nhạy của mạng nhận diện một cách độc lập.
+
+        Args:
+            image (numpy.ndarray): Khung hình ảnh gốc (BGR).
+            detections (list hoặc numpy.ndarray): Danh sách các hộp nhận diện. Mỗi phần tử 
+                chứa thông số [x, y, w, h, conf, class_id].
+            frame_idx (int, optional): Số thứ tự khung hình hiện tại. Mặc định là 0.
+
+        Returns:
+            numpy.ndarray: Khung hình đã được vẽ các hộp nhận diện thô (dạng hộp xám).
         """
         draw_image = image.copy()
         for det in detections:
@@ -99,8 +163,12 @@ class Visualizer:
     
     def release(self):
         """
-        Đóng gói và xuất file Video. (Rất quan trọng, nếu quên gọi hàm này video sẽ bị lỗi hỏng file).
+        Đóng gói và xuất tệp Video hoàn chỉnh.
+
+        Hàm này gọi phương thức release của OpenCV VideoWriter. Rất quan trọng 
+        để giải phóng bộ đệm (buffer) ở cuối chu trình, nếu quên gọi hàm này, 
+        tệp video lưu ra có thể bị hỏng (corrupted).
         """
         if self.writer is not None:
             self.writer.release()
-            print(f"[+] Đã lưu video kết quả Tracking tại: {self.output_path}")
+            print(f"[INFO] Đã lưu video kết quả Tracking tại: {self.output_path}")

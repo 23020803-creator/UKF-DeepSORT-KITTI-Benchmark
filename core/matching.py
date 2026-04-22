@@ -5,7 +5,22 @@ from scipy.optimize import linear_sum_assignment
 import scipy.linalg
 
 def compute_cosine_distance(tracks, features_new):
-    """Tính khoảng cách Cosine từ Det mới tới Track (Đã tối ưu cho EMA)"""
+    """
+    Tính ma trận khoảng cách Cosine giữa các quỹ đạo hiện tại và các đặc trưng nhận diện mới.
+    
+    Hàm này đã được tối ưu hóa để sử dụng Exponential Moving Average (EMA) của các track
+    và sử dụng phép toán vectorized của scipy để tăng tốc độ thực thi.
+
+    Args:
+        tracks (list): Danh sách các đối tượng Track hiện hành. Mỗi đối tượng cần có 
+            thuộc tính `smooth_feature` (mảng numpy 1D).
+        features_new (numpy.ndarray): Ma trận (N, 512) chứa các vector đặc trưng 
+            từ mạng ReID của N detections mới.
+
+    Returns:
+        numpy.ndarray: Ma trận khoảng cách (M, N), trong đó M là số lượng tracks và 
+        N là số lượng detections. Khoảng cách nằm trong khoảng [0, 2].
+    """
     if len(tracks) == 0 or len(features_new) == 0:
         return np.empty((len(tracks), len(features_new)))
     
@@ -25,7 +40,22 @@ def compute_cosine_distance(tracks, features_new):
     return cost_matrix
 
 def compute_iou_matrix(tracks, detections, img_w, img_h):
-    """Tính ma trận IoU có hỗ trợ Asymmetrical IoM khi xe chạm viền ảnh"""
+    """
+    Tính ma trận chi phí IoU (Intersection over Union) giữa hộp bao dự đoán và thực tế.
+    
+    Đặc biệt, hàm này hỗ trợ luật Asymmetrical IoM (Intersection over Minimum) 
+    để giải quyết các trường hợp vật thể bị che khuất hoặc chạm viền ảnh.
+
+    Args:
+        tracks (list): Danh sách các đối tượng Track hiện hành. Yêu cầu có hàm `to_tlwh()`.
+        detections (list): Danh sách các đối tượng Detection mới. Yêu cầu có thuộc tính `bbox`.
+        img_w (int): Chiều rộng của khung hình gốc.
+        img_h (int): Chiều cao của khung hình gốc.
+
+    Returns:
+        numpy.ndarray: Ma trận chi phí IoU kích thước (M, N). Giá trị bằng 1.0 - best_metric.
+        Giá trị 1.0 thể hiện không có sự giao nhau.
+    """
     if len(tracks) == 0 or len(detections) == 0:
         return np.zeros((len(tracks), len(detections)))
     
@@ -67,19 +97,21 @@ def linear_assignment(cost_matrix, tracks, detections, max_distance=0.2):
     Giải quyết bài toán ghép cặp (Bipartite Matching) bằng thuật toán Hungarian.
     
     Thuật toán Hungarian (linear_sum_assignment) tìm ra cách ghép sao cho 
-    *tổng* chi phí của toàn bộ các cặp là nhỏ nhất (Global Optimum), 
+    tổng chi phí của toàn bộ các cặp là nhỏ nhất (Global Optimum), 
     thay vì ưu tiên ghép cặp có chi phí thấp nhất trước (Greedy).
     
     Args:
-        cost_matrix: Ma trận (M, N) từ hàm compute_cosine_distance.
-        tracks: Danh sách đối tượng Track (M). Yêu cầu đối tượng có thuộc tính `class_id`.
-        detections: Danh sách đối tượng Detection (N). Yêu cầu đối tượng có thuộc tính `class_id`.
-        max_distance: Ngưỡng loại bỏ. Khoảng cách > max_distance sẽ không được ghép.
+        cost_matrix (numpy.ndarray): Ma trận chi phí kích thước (M, N).
+        tracks (list): Danh sách đối tượng Track (M). Yêu cầu đối tượng có thuộc tính `class_id`.
+        detections (list): Danh sách đối tượng Detection (N). Yêu cầu đối tượng có thuộc tính `class_id`.
+        max_distance (float, optional): Ngưỡng chi phí tối đa. Các cặp có chi phí lớn hơn 
+            sẽ không được ghép nối. Mặc định là 0.2.
         
     Returns:
-        matches: List các tuple (track_idx, det_idx) ghép thành công.
-        unmatched_tracks: List các track_idx không ghép được.
-        unmatched_detections: List các det_idx mới tinh.
+        tuple: Chứa 3 phần tử:
+            - matches (list): Danh sách các tuple (track_idx, det_idx) đại diện cho các cặp ghép thành công.
+            - unmatched_tracks (list): Danh sách các chỉ số (index) của track không tìm được cặp.
+            - unmatched_detections (list): Danh sách các chỉ số (index) của detection chưa được ghép.
     """
     # Khởi tạo kết quả rỗng nếu ma trận trống
     if cost_matrix.size == 0:
@@ -129,8 +161,18 @@ def linear_assignment(cost_matrix, tracks, detections, max_distance=0.2):
 
 def compute_mahalanobis_distance(tracks, detections):
     """
-    Tính ma trận bình phương khoảng cách Mahalanobis (Dynamic Gating).
-    Trả về ma trận (M, N).
+    Tính ma trận bình phương khoảng cách Mahalanobis để thực hiện Dynamic Gating.
+    
+    Hàm này đánh giá độ lệch giữa đo lường thực tế (detections) và dự đoán của bộ lọc (tracks),
+    có tính đến độ bất định (covariance) của dự đoán UKF.
+    
+    Args:
+        tracks (list): Danh sách các đối tượng Track hiện tại. Yêu cầu mỗi đối tượng 
+            có thuộc tính `ukf` (với `mean` và `covariance`) và hàm `_tlwh_to_xyah()`.
+        detections (list): Danh sách các đối tượng Detection. Yêu cầu có thuộc tính `bbox`.
+
+    Returns:
+        numpy.ndarray: Ma trận khoảng cách Mahalanobis bình phương (D^2) kích thước (M, N).
     """
     if len(tracks) == 0 or len(detections) == 0:
         return np.zeros((len(tracks), len(detections)))
