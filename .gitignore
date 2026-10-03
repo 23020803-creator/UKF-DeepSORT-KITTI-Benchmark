@@ -212,3 +212,6 @@ test_yolo_100fps.py
 det.txt
 frames/
 extract_frames.py
+TrackEval_Workspace*/
+outputs/
+scratch/

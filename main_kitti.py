@@ -38,13 +38,12 @@ def main():
     FPS = 10 
 
     # Khởi tạo đọc dữ liệu và công cụ trực quan hóa
-    parser = KittiParser(seq_dir="datasets/KITTI_MOT/KITTI-0001")
+    parser = KittiParser(seq_dir="datasets/KITTI_MOT/KITTI-0000")
     visualizer = Visualizer(output_path="outputs/videos/test_ukf_cmc.mp4", fps=FPS)
     
     # Khởi tạo các mô hình Deep Learning
-    detector = YOLODetector(model_path="weights/yolo11n_int8_openvino_model", conf_thresh=CONF_THRESHOLD)
-    reid_vehicle = ReIDExtractor(model_path="weights/public/vehicle-reid-0001/osnet_ain_x1_0_vehicle_reid.xml", device="CPU")
-    reid_person = ReIDExtractor(model_path="weights/intel/person-reidentification-retail-0288/FP16/person-reidentification-retail-0288.xml", device="CPU")
+    detector = YOLODetector(model_path="weights/yolo26n_int8_openvino_model", conf_thresh=CONF_THRESHOLD)
+    reid = ReIDExtractor(model_path="weights/unified/unified_reid_int8.xml", device="CPU")
     
     # Khởi tạo công cụ đo chuyển động máy ảnh
     cmc_engine = SparseOpticalFlowCMC()
@@ -67,45 +66,17 @@ def main():
         H_camera = cmc_engine.apply(image)
         cmc_time = (time.time() - t_cmc_start) * 1000
 
-        # Bước 2: Phát hiện vật thể bằng YOLO
+        # Bước 2: Phát hiện vật thể bằng YOLO (đã tích hợp NMS phân biệt từng lớp)
         t_yolo_start = time.time()
-        bboxes, confs, class_ids = detector.detect(image)
-        
-        # Áp dụng bộ lọc Non-Maximum Suppression (NMS)
-        valid_bboxes, valid_confs, valid_class_ids = [], [], []
-        if len(bboxes) > 0:
-            indices = cv2.dnn.NMSBoxes(bboxes, confs, score_threshold=CONF_THRESHOLD, nms_threshold=NMS_THRESHOLD)
-            if len(indices) > 0:
-                indices = indices.flatten() if hasattr(indices, 'flatten') else indices
-                for i in indices:
-                    valid_bboxes.append(bboxes[i])
-                    valid_confs.append(confs[i])
-                    valid_class_ids.append(class_ids[i])
+        valid_bboxes, valid_confs, valid_class_ids = detector.detect(image)
         yolo_time = (time.time() - t_yolo_start) * 1000
 
-        # Bước 3: Trích xuất đặc trưng ReID phân cụm theo lớp đối tượng
+        # Bước 3: Trích xuất đặc trưng ReID bằng mô hình Unified ReID duy nhất
         t_reid_start = time.time()
-        features = []
-        
         if len(valid_bboxes) > 0:
-            for i, bbox in enumerate(valid_bboxes):
-                cls_id = valid_class_ids[i]
-                
-                # Áp dụng mô hình Intel ReID cho Person (Class 0)
-                if cls_id == 0:
-                    feat = reid_person.extract(image, np.array([bbox]))[0]
-                    # Đệm mảng bằng 0 để tương thích kích thước vector 512 của Tracker
-                    if feat.shape[0] < 512:
-                        feat = np.pad(feat, (0, 512 - feat.shape[0]), 'constant')
-                # Áp dụng mô hình OSNet cho Phương tiện (Vehicle)
-                else:
-                    feat = reid_vehicle.extract(image, np.array([bbox]))[0]
-                    
-                features.append(feat)
-                
-            features = np.array(features, dtype=np.float32)
+            features = reid.extract(image, valid_bboxes)
         else:
-            features = np.zeros((0, 512), dtype=np.float32)
+            features = np.zeros((0, 256), dtype=np.float32)
         time_reid_total = (time.time() - t_reid_start) * 1000
 
         # Bước 4: Đẩy dữ liệu vào Tracker (Lọc UKF + Ghép cặp Hungarian)

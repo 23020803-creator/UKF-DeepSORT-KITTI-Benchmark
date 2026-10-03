@@ -11,8 +11,15 @@ chạy thuật toán và xuất kết quả quỹ đạo ra các tệp văn bả
 
 import time
 import os
+import sys
 import numpy as np
 import cv2
+
+# Đảm bảo import được các module từ thư mục gốc của dự án
+current_dir = os.path.dirname(os.path.abspath(__file__))
+project_root = os.path.dirname(current_dir)
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
 
 from utils.kitti_parser import KittiParser
 from models.yolo_detector import YOLODetector
@@ -66,9 +73,8 @@ def main():
 
     # 2. Khởi tạo các mạng AI (Tối ưu: Chỉ khởi tạo 1 lần ngoài vòng lặp để tránh tràn RAM)
     print("\n[INFO] Đang tải các mô hình AI lên bộ nhớ...")
-    detector = YOLODetector(model_path="weights/yolo11n_int8_openvino_model", conf_thresh=CONF_THRESHOLD)
-    reid_vehicle = ReIDExtractor(model_path="weights/public/vehicle-reid-0001/osnet_int8/osnet_vehicle_int8.xml", device="CPU")
-    reid_person = ReIDExtractor(model_path="weights/intel/person-reidentification-retail-0288/FP16/person-reidentification-retail-0288.xml", device="CPU")
+    detector = YOLODetector(model_path="weights/yolo26n_int8_openvino_model", conf_thresh=CONF_THRESHOLD)
+    reid = ReIDExtractor(model_path="weights/unified/unified_reid_int8.xml", device="CPU")
     print("[SUCCESS] Tải mô hình thành công!\n")
 
     total_pipeline_time = 0.0
@@ -107,42 +113,22 @@ def main():
             # Bước 2: Phát hiện vật thể (YOLO)
             bboxes, confs, class_ids = detector.detect(image)
             
-            # Lọc NMS & Lọc theo Class (Chỉ cho phép Người và Ô tô)
-            valid_bboxes, valid_confs, valid_class_ids = [], [], []
-            if len(bboxes) > 0:
-                indices = cv2.dnn.NMSBoxes(bboxes, confs, score_threshold=CONF_THRESHOLD, nms_threshold=NMS_THRESHOLD)
-                if len(indices) > 0:
-                    indices = indices.flatten() if hasattr(indices, 'flatten') else indices
-                    for i in indices:
-                        cls_id = class_ids[i]
-                        if cls_id in TARGET_CLASSES:
-                            valid_bboxes.append(bboxes[i])
-                            valid_confs.append(confs[i])
-                            valid_class_ids.append(cls_id)
+            # YOLODetector đã thực hiện NMS phân biệt từng lớp và lọc sẵn Person (0) & Car (2)
+            valid_bboxes = bboxes
+            valid_confs = confs
+            valid_class_ids = class_ids
 
-            # Bước 3: Trích xuất đặc trưng ReID
-            features = []
+            # Bước 3: Trích xuất đặc trưng ReID bằng Unified ReID duy nhất cho cả Người và Xe
             if len(valid_bboxes) > 0:
-                for i, bbox in enumerate(valid_bboxes):
-                    cls_id = valid_class_ids[i]
-                    if cls_id == 0: 
-                        feat = reid_person.extract(image, np.array([bbox]))[0]
-                        # Đệm thêm zero để đồng nhất không gian vector
-                        if feat.shape[0] < 512:
-                            feat = np.pad(feat, (0, 512 - feat.shape[0]), 'constant')
-                    elif cls_id == 2: 
-                        feat = reid_vehicle.extract(image, np.array([bbox]))[0]
-                        
-                    features.append(feat)
-                features = np.array(features, dtype=np.float32)
+                features = reid.extract(image, valid_bboxes)
             else:
-                features = np.zeros((0, 512), dtype=np.float32)
+                features = np.zeros((0, 256), dtype=np.float32)
 
             # Bước 4: Đẩy dữ liệu vào Tracker (Cập nhật UKF và Liên kết dữ liệu)
             tracker.update(valid_bboxes, valid_confs, valid_class_ids, features, frame_shape=(img_h, img_w), H_camera=H_camera, frame_idx=frame_idx)
 
-            # Bước 5: Thu thập kết quả và định dạng theo chuẩn MOT16
-            draw_data = tracker.get_results()
+            # Bước 5: Thu thập kết quả theo chuẩn MOT16 (Chế độ Benchmark: only_detected=True)
+            draw_data = tracker.get_results(only_detected=True)
             for data in draw_data:
                 track_id, class_id, x, y, w, h, *_ = data
                 res_line = f"{frame_idx},{track_id},{x:.2f},{y:.2f},{w:.2f},{h:.2f},1.0,{class_id},-1,-1\n"

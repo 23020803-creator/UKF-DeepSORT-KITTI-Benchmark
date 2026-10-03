@@ -42,7 +42,7 @@ if project_root not in sys.path:
 
 from models.yolo_detector import YOLODetector
 
-def run_fps_test_and_save_video(video_path, model_name="yolo11n_int8_openvino_model", output_filename="output_openvino_int8.mp4"):
+def run_fps_test_and_save_video(video_path, model_name="yolo26n_int8_openvino_model", output_filename="output_openvino_int8.mp4"):
     print(f"--- BẮT ĐẦU CHẠY VÀ XUẤT VIDEO CHO {model_name.upper()} ---")
     
     weight_path = os.path.join(project_root, "weights", model_name)
@@ -126,6 +126,6 @@ if __name__ == "__main__":
     
     run_fps_test_and_save_video(
         video_path=absolute_dataset_path, 
-        model_name="yolo11n_int8_openvino_model", 
+        model_name="yolo26n_int8_openvino_model", 
         output_filename="output_openvino_int8.mp4"
     )

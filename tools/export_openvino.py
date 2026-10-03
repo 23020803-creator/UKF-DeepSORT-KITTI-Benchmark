@@ -21,43 +21,43 @@ current_dir = os.path.dirname(os.path.abspath(__file__))
 project_root = os.path.dirname(current_dir)
 weights_dir = os.path.join(project_root, "weights")
 
-def export_model_int8():
+def export_model_int8(model_name="yolo26n.pt"):
     """
     Thực thi quá trình lượng tử hóa và xuất mô hình OpenVINO.
 
     Hàm này thực hiện các công việc sau:
-    1. Định vị mô hình PyTorch gốc (`yolo11n.pt`) trong thư mục weights.
+    1. Định vị mô hình PyTorch gốc (mặc định `yolo26n.pt`) trong thư mục weights.
     2. Khởi tạo đối tượng YOLO từ mô hình.
     3. Kích hoạt tính năng export của Ultralytics với các tham số:
        - format="openvino": Xuất ra định dạng IR (.xml và .bin).
        - int8=True: Kích hoạt bộ lượng tử hóa PTQ.
        - data="coco8.yaml": Cấp tập dữ liệu mẫu để tính toán Scale và Zero-point.
-       - imgsz=480: Ghim cứng kích thước đầu vào (Static Shape).
+       - imgsz=[288, 960]: Kích thước đầu vào chuẩn cho KITTI MOT.
        - task='detect': Chỉ định bài toán là phát hiện vật thể.
     """
-    print("[INFO] BẮT ĐẦU BIÊN DỊCH MODEL OPENVINO (PHIÊN BẢN INT8 TỐI ƯU FPS)")
+    print(f"[INFO] BẮT ĐẦU BIÊN DỊCH MODEL OPENVINO CHO {model_name} (PHIÊN BẢN INT8 TỐI ƯU FPS)")
     
-    pt_model_path = os.path.join(weights_dir, "yolo11n.pt")
+    pt_model_path = os.path.join(weights_dir, model_name)
     
     if not os.path.exists(pt_model_path):
         print(f"[ERROR] Không tìm thấy mô hình PyTorch gốc tại: {pt_model_path}")
-        print("[HINT] Vui lòng tải file yolo11n.pt vào thư mục weights trước khi chạy.")
+        print(f"[HINT] Vui lòng kiểm tra file {model_name} trong thư mục weights.")
         return
 
     print(f"[INFO] Tải mô hình gốc: {pt_model_path}")
     model = YOLO(pt_model_path)
     
     print("[INFO] Đang tiến hành lượng tử hóa (Quantization) và hiệu chuẩn (Calibration)...")
-    # Kích hoạt ép kiểu INT8 và cấp tập dữ liệu để Calibration
+    # Kích hoạt ép kiểu INT8 và cấp tập dữ liệu để Calibration với tỷ lệ ảnh KITTI
     model.export(
         format="openvino", 
-        int8=True,          # Bật lượng tử hóa 8-bit
-        data="coco8.yaml",  # Dữ liệu mẫu để đo lường Scale/Zero-point (Ultralytics tự tải nếu thiếu)
-        imgsz=480,          
+        int8=True,                # Bật lượng tử hóa 8-bit
+        data="coco8.yaml",        # Dữ liệu mẫu để đo lường Scale/Zero-point
+        imgsz=[288, 960],         # Kích thước chuẩn ngang của KITTI
         task='detect'       
     )
     
     print("[SUCCESS] Lượng tử hóa INT8 và biên dịch OpenVINO hoàn tất!")
 
 if __name__ == "__main__":
-    export_model_int8()
+    export_model_int8("yolo26n.pt")

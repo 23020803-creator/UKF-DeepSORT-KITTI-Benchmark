@@ -85,6 +85,7 @@ class Tracker:
         # ====================================================================
         # BỘ LỌC CẮT TỈA (EDGE-NOISE PRUNING) - Lọc rác YOLO
         # ====================================================================
+        feat_dim = features.shape[1] if (features is not None and len(features) > 0 and hasattr(features, 'shape')) else 256
         valid_dets = []
         for i in range(len(bboxes)):
             # Tọa độ gốc của YOLO
@@ -197,7 +198,7 @@ class Tracker:
                     actual_trk_idx = iou_trk_idx[trk_i]
                     actual_det_idx = unmatched_dets_idx[det_i]
                     det = valid_dets[actual_det_idx]
-                    if det.feature is None: det.feature = np.zeros(512, dtype=np.float32)
+                    if det.feature is None: det.feature = np.zeros(feat_dim, dtype=np.float32)
                     self.tracks[actual_trk_idx].update(det.bbox, det.feature, img_w, img_h)
                     unmatched_trks_idx.remove(actual_trk_idx)
                     
@@ -308,7 +309,7 @@ class Tracker:
                     actual_det_idx = unmatched_dets_idx[det_i]
                     
                     det = valid_dets[actual_det_idx]
-                    if det.feature is None: det.feature = np.zeros(512, dtype=np.float32)
+                    if det.feature is None: det.feature = np.zeros(feat_dim, dtype=np.float32)
                     self.tracks[actual_trk_idx].update(det.bbox, det.feature, img_w, img_h)
                     unmatched_trks_idx.remove(actual_trk_idx)
                     
@@ -344,26 +345,34 @@ class Tracker:
                 
         self.tracks = [t for t in self.tracks if not t.is_deleted()]
 
-    def get_results(self):
+    def get_results(self, only_detected=False):
         """
         Trích xuất kết quả tracking cuối cùng của khung hình hiện tại.
+
+        Args:
+            only_detected (bool): Nếu True, chỉ xuất các track có phát hiện (detection) 
+                ở khung hình hiện tại (time_since_update == 0). Rất quan trọng khi chạy 
+                đánh giá Benchmark (MOT16/TrackEval) để không bị phạt False Positives do 
+                dự đoán quán tính kéo dài sau khi vật thể đã biến mất khỏi ground truth.
+                Nếu False, cho phép UKF duy trì dự đoán tối đa 10 frame (phù hợp xem video trực tiếp).
 
         Returns:
             list: Danh sách các tuple đại diện cho mỗi quỹ đạo hợp lệ. 
                 Định dạng: (track_id, class_id, ukf_x, ukf_y, ukf_w, ukf_h, yolo_x, yolo_y, yolo_w, yolo_h)
         """
-        # Trả về tuple 10 phần tử: (track_id, class_id, ukf_x, ukf_y, ukf_w, ukf_h, yolo_x, yolo_y, yolo_w, yolo_h)
         results = []
         for t in self.tracks:
-            # Cho phép UKF duy trì dự đoán trên màn hình tối đa 10 frame khi mất dấu
-            if t.time_since_update <= 10 and t.is_confirmed():
-                
-                # LOGIC LỌC BÓNG MA YOLO:
+            if not t.is_confirmed():
+                continue
+
+            if only_detected:
+                # Chế độ Benchmark: Chỉ xuất khi có detection thực tế ở frame này
                 if t.time_since_update == 0:
-                    yolo_box = t.last_bbox # YOLO bắt được -> Lấy tọa độ thật
-                else:
-                    yolo_box = [0, 0, 0, 0] # YOLO mù -> Ép tọa độ YOLO về 0 để tàng hình
-                    
-                results.append((t.track_id, t.class_id, *t.to_tlwh(), *yolo_box))
+                    results.append((t.track_id, t.class_id, *t.to_tlwh(), *t.last_bbox))
+            else:
+                # Chế độ Real-time GUI: Duy trì tối đa 10 frame khi mất dấu để hình ảnh mượt mà
+                if t.time_since_update <= 10:
+                    yolo_box = t.last_bbox if t.time_since_update == 0 else [0, 0, 0, 0]
+                    results.append((t.track_id, t.class_id, *t.to_tlwh(), *yolo_box))
                 
         return results

@@ -24,17 +24,18 @@ def compute_cosine_distance(tracks, features_new):
     if len(tracks) == 0 or len(features_new) == 0:
         return np.empty((len(tracks), len(features_new)))
     
-    # 1. Rút trích tất cả smooth_feature của các Track hiện tại thành ma trận (M, 512)
+    features_new = np.asarray(features_new)
+    feat_dim = features_new.shape[1] if (features_new is not None and features_new.ndim == 2 and features_new.shape[1] > 0) else 256
     track_features = []
     for track in tracks:
         # Lấy feature, nếu bị None (do khởi tạo chưa có) thì dùng vector 0
-        feat = track.smooth_feature if (hasattr(track, 'smooth_feature') and track.smooth_feature is not None) else np.zeros(512)
+        feat = track.smooth_feature if (hasattr(track, 'smooth_feature') and track.smooth_feature is not None) else np.zeros(feat_dim)
         track_features.append(feat)
         
     track_features = np.array(track_features)
     
     # 2. Tính toán Vectorized cực nhanh cho toàn bộ hệ thống
-    # cdist(M x 512, N x 512) -> Trả ra ma trận (M, N)
+    # cdist(M x D, N x D) -> Trả ra ma trận (M, N)
     cost_matrix = cdist(track_features, features_new, metric='cosine')
     
     return cost_matrix

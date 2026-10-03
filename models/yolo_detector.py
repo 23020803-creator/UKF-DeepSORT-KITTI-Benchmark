@@ -8,6 +8,7 @@ Chỉ tập trung nhận diện Người (Person) và Xe ô tô (Car).
 """
 
 import os
+import glob
 import cv2
 import numpy as np
 import torch
@@ -33,12 +34,12 @@ class YOLODetector:
         coco_to_id (dict): Từ điển ánh xạ từ ID của bộ dữ liệu COCO sang ID tùy chỉnh của hệ thống.
     """
 
-    def __init__(self, model_path="weights/yolo11n_int8_openvino_model", conf_thresh=0.7):
+    def __init__(self, model_path="weights/yolo26n_int8_openvino_model", conf_thresh=0.7):
         """
         Khởi tạo YOLODetector, nạp và biên dịch mô hình lên CPU.
 
         Args:
-            model_path (str): Đường dẫn tới thư mục chứa tệp mô hình OpenVINO (yolo11n.xml).
+            model_path (str): Đường dẫn tới thư mục chứa tệp mô hình OpenVINO hoặc tệp .xml.
             conf_thresh (float): Ngưỡng tự tin (confidence threshold) cho NMS.
         """
         self.conf_thresh = conf_thresh
@@ -49,12 +50,24 @@ class YOLODetector:
         print("[INFO] Đang khởi tạo Lõi OpenVINO (Native Core)...")
         self.core = ov.Core()
         
-        xml_path = os.path.join(model_path, "yolo11n.xml")
+        if os.path.isfile(model_path) and model_path.endswith('.xml'):
+            xml_path = model_path
+        elif os.path.isdir(model_path):
+            xml_candidates = glob.glob(os.path.join(model_path, "*.xml"))
+            if not xml_candidates:
+                raise FileNotFoundError(f"Không tìm thấy tệp .xml nào trong: {model_path}")
+            # Ưu tiên yolo26n.xml hoặc yolo11n.xml nếu có
+            preferred = [f for f in xml_candidates if "yolo26" in f or "yolo11" in f]
+            xml_path = preferred[0] if preferred else xml_candidates[0]
+        else:
+            xml_path = model_path
+            
+        print(f"[INFO] Nạp mô hình OpenVINO từ: {xml_path}")
         model = self.core.read_model(model=xml_path)
         
         self.compiled_model = self.core.compile_model(model=model, device_name="CPU")
         self.output_layer = self.compiled_model.output(0)
-        print("[SUCCESS] Đã load và biên dịch model trực tiếp lên CPU!")
+        print(f"[SUCCESS] Đã load và biên dịch model trực tiếp lên CPU! Đầu ra shape: {self.output_layer.partial_shape}")
 
         # Chỉ giữ lại Person (0) và Car (2), loại bỏ các class không cần thiết
         self.coco_to_id = {

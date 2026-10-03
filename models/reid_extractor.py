@@ -57,14 +57,14 @@ class ReIDExtractor:
         out_shape = self.output_layer.partial_shape
         self.output_dim = out_shape[-1].get_length() if out_shape[-1].is_static else 512 
 
-        self.is_osnet = "osnet" in model_path.lower()
+        self.is_normalized = ("osnet" in model_path.lower()) or ("unified" in model_path.lower())
 
     def _preprocess(self, img):
         """
         Tiền xử lý vùng ảnh cắt (crop) thành Tensor chuẩn đầu vào của mạng nơ-ron.
         
-        Nếu mô hình là OSNet, ảnh sẽ được chuyển sang không gian RGB, chuẩn hóa về [0, 1]
-        và áp dụng Z-score normalization (Mean, Std). Với các mô hình khác, ảnh giữ nguyên BGR.
+        Nếu mô hình là OSNet hoặc Unified ReID, ảnh sẽ được chuyển sang RGB, chuẩn hóa về [0, 1]
+        và áp dụng Z-score normalization (Mean, Std). Với các mô hình khác (Intel), ảnh giữ nguyên BGR.
 
         Args:
             img (numpy.ndarray): Ảnh đầu vào đã được cắt theo hộp bao (H, W, C).
@@ -74,7 +74,7 @@ class ReIDExtractor:
         """
         resized = cv2.resize(img, (self.w, self.h))
         
-        if self.is_osnet:
+        if self.is_normalized:
             resized = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
             resized = resized.astype(np.float32) / 255.0
             mean = np.array([0.485, 0.456, 0.406], dtype=np.float32)

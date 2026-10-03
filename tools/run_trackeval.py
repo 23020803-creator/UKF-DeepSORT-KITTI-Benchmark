@@ -108,6 +108,11 @@ def evaluate_single_class(target_class_name, target_mot_id):
                             # TRICK: Ép class ID về 1 để vượt rào TrackEval
                             parts[7] = '1' 
                             gt_lines.append(",".join(parts) + "\n")
+                        elif cls_id == 12:
+                            # Bảo toàn nhãn 12 (DontCare / distractor): TrackEval sẽ tự động
+                            # miễn trừ False Positive khi tracker phát hiện đối tượng trong vùng này
+                            parts[7] = '12'
+                            gt_lines.append(",".join(parts) + "\n")
 
         # --- C. LỌC VÀ ĐÁNH LỪA DỮ LIỆU TRACKER KẾT QUẢ ---
         trk_lines = []
