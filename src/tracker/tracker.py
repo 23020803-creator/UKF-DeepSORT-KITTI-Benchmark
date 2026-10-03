@@ -1,6 +1,6 @@
 import numpy as np
-from core.track import Track, TrackState
-from core import matching
+from src.tracker.track import Track, TrackState
+from src.tracker import matching
 
 class Detection:
     """

@@ -40,7 +40,7 @@ project_root = os.path.dirname(scripts_dir)
 if project_root not in sys.path:
     sys.path.append(project_root)
 
-from models.yolo_detector import YOLODetector
+from core.yolo_detector import YOLODetector
 
 def run_fps_test_and_save_video(video_path, model_name="yolo26n_int8_openvino_model", output_filename="output_openvino_int8.mp4"):
     print(f"--- BẮT ĐẦU CHẠY VÀ XUẤT VIDEO CHO {model_name.upper()} ---")

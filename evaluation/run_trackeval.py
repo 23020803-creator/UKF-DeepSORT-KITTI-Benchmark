@@ -196,3 +196,35 @@ if __name__ == '__main__':
     evaluate_single_class(target_class_name='car', target_mot_id=3)
     
     print("\n[SUCCESS] === HOÀN TẤT TOÀN BỘ QUÁ TRÌNH CHẤM ĐIỂM BẰNG TRACKEVAL ===")
+
+    # In Bảng Tổng Kết (Summary Table)
+    def parse_summary(filepath):
+        if not os.path.exists(filepath):
+            return None
+        with open(filepath, 'r') as f:
+            lines = f.readlines()
+            if len(lines) >= 2:
+                headers = lines[0].strip().split()
+                values = lines[1].strip().split()
+                return dict(zip(headers, values))
+        return None
+
+    car_summary = os.path.join("TrackEval_Workspace_car", "outputs", "UKF_DeepSORT", "pedestrian_summary.txt")
+    ped_summary = os.path.join("TrackEval_Workspace_pedestrian", "outputs", "UKF_DeepSORT", "pedestrian_summary.txt")
+    
+    car_data = parse_summary(car_summary)
+    ped_data = parse_summary(ped_summary)
+
+    if car_data and ped_data:
+        print("\n=================================================")
+        print("               BẢNG TỔNG KẾT (SUMMARY)           ")
+        print("=================================================\n")
+        print("| Lớp Đối Tượng | HOTA(%) | MOTA(%) | MOTP(%) | IDF1(%) | IDSW | Frag | Dets  | GT Dets |")
+        print("|---------------|---------|---------|---------|---------|------|------|-------|---------|")
+        
+        def format_row(name, data):
+            return f"| {name:<13} | {data.get('HOTA','-'):>7} | {data.get('MOTA','-'):>7} | {data.get('MOTP','-'):>7} | {data.get('IDF1','-'):>7} | {data.get('IDSW','-'):>4} | {data.get('Frag','-'):>4} | {data.get('Dets','-'):>5} | {data.get('GT_Dets','-'):>7} |"
+
+        print(format_row("Xe (Car)", car_data))
+        print(format_row("Người (Ped)", ped_data))
+        print("\n")

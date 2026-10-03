@@ -21,11 +21,11 @@ project_root = os.path.dirname(current_dir)
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
-from utils.kitti_parser import KittiParser
-from models.yolo_detector import YOLODetector
-from models.reid_extractor import ReIDExtractor
-from core.tracker import Tracker
-from core.cmc import SparseOpticalFlowCMC
+from src.dataloader.dataloader import KittiParser
+from src.detector.detector import YOLODetector
+from src.extractor.extractor import ReIDExtractor
+from src.tracker.tracker import Tracker
+from src.cmc.cmc import SparseOpticalFlowCMC
 
 def main():
     """

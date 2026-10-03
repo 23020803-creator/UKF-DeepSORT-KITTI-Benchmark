@@ -17,8 +17,8 @@ project_root = os.path.dirname(current_dir)
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
-from utils.kitti_parser import KittiParser
-from models.yolo_detector import YOLODetector
+from src.dataloader.dataloader import KittiParser
+from src.detector.detector import YOLODetector
 
 def generate_detections_for_sequence(seq_name, data_dir="datasets/KITTI_MOT", model_path="weights/yolo26n_int8_openvino_model", conf_thresh=0.5):
     """

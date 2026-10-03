@@ -215,3 +215,5 @@ extract_frames.py
 TrackEval_Workspace*/
 outputs/
 scratch/
+
+TrackEval_Workspace_*

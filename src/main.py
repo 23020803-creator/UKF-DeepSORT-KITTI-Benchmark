@@ -12,12 +12,20 @@ import time
 import numpy as np
 import cv2
 
-from utils.kitti_parser import KittiParser
-from utils.visualizer import Visualizer
-from models.yolo_detector import YOLODetector
-from models.reid_extractor import ReIDExtractor
-from core.tracker import Tracker
-from core.cmc import SparseOpticalFlowCMC
+import os
+import sys
+
+current_dir = os.path.dirname(os.path.abspath(__file__))
+project_root = os.path.dirname(current_dir)
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
+
+from src.dataloader.dataloader import KittiParser
+from src.visualizer.visualizer import Visualizer
+from src.detector.detector import YOLODetector
+from src.extractor.extractor import ReIDExtractor
+from src.tracker.tracker import Tracker
+from src.cmc.cmc import SparseOpticalFlowCMC
 
 def main():
     """
