@@ -45,6 +45,10 @@ class TrackUKF:
             # [QUAN TRỌNG 1]: Giải nén phần tử thứ 8 thành biến `gamma` thay vì `vh`
             cx, cy, a, h, vx, vy, omega, gamma = x
             
+            # Giới hạn giá trị gamma và omega để tránh nổ số học (NaN/Inf)
+            gamma = np.clip(gamma, -2.0, 2.0)
+            omega = np.clip(omega, -3.14, 3.14)
+            
             # Logic tính toán không gian 2D (Chống chia 0 khi xe đi thẳng)
             if abs(omega) < 1e-4:
                 cx_new = cx + vx * dt

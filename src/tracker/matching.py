@@ -225,7 +225,16 @@ def compute_mahalanobis_distance(tracks, detections):
         except np.linalg.LinAlgError:
             # Fallback an toàn nếu hệ không xác định dương (Positive-definite)
             S = S + np.eye(4) * 1e-6
-            cholesky_factor = scipy.linalg.cho_factor(S)
+            try:
+                cholesky_factor = scipy.linalg.cho_factor(S)
+            except (np.linalg.LinAlgError, ValueError):
+                # Nếu vẫn lỗi hoặc chứa NaN
+                dist_matrix[i, :] = np.inf
+                continue
+        except ValueError:
+            # Chứa NaN hoặc Inf
+            dist_matrix[i, :] = np.inf
+            continue
             
         for j, det in enumerate(detections):
             # Biến đổi bbox YOLO về [cx, cy, a, h]

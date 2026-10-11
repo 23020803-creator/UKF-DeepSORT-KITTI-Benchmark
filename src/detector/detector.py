@@ -39,14 +39,28 @@ class YOLODetector:
         Khởi tạo YOLODetector, nạp và biên dịch mô hình lên CPU.
 
         Args:
-            model_path (str): Đường dẫn tới thư mục chứa tệp mô hình OpenVINO hoặc tệp .xml.
+            model_path (str): Đường dẫn tới thư mục chứa tệp mô hình OpenVINO, tệp .xml hoặc tệp .pt.
             conf_thresh (float): Ngưỡng tự tin (confidence threshold) cho NMS.
         """
         self.conf_thresh = conf_thresh
         
         self.img_width = 960  
         self.img_height = 288 
+        self.is_pt = model_path.endswith('.pt')
+
+        # Chỉ giữ lại Person (0) và Car (2), loại bỏ các class không cần thiết
+        self.coco_to_id = {
+            0: 0,  # person -> Person
+            2: 2,  # car -> Car
+        }
         
+        if self.is_pt:
+            from ultralytics import YOLO
+            print(f"[INFO] Nạp mô hình PyTorch từ: {model_path}")
+            self.model = YOLO(model_path)
+            print(f"[SUCCESS] Đã load model PyTorch!")
+            return
+            
         print("[INFO] Đang khởi tạo Lõi OpenVINO (Native Core)...")
         self.core = ov.Core()
         
@@ -68,12 +82,6 @@ class YOLODetector:
         self.compiled_model = self.core.compile_model(model=model, device_name="CPU")
         self.output_layer = self.compiled_model.output(0)
         print(f"[SUCCESS] Đã load và biên dịch model trực tiếp lên CPU! Đầu ra shape: {self.output_layer.partial_shape}")
-
-        # Chỉ giữ lại Person (0) và Car (2), loại bỏ các class không cần thiết
-        self.coco_to_id = {
-            0: 0,  # person -> Person
-            2: 2,  # car -> Car
-        }
 
     def _letterbox(self, img, new_shape=(960, 288), color=(114, 114, 114)):
         """
@@ -124,6 +132,35 @@ class YOLODetector:
                 - class_ids (numpy.ndarray): ID phân loại đối tượng, shape (N,).
                 Nếu không phát hiện được gì, trả về các mảng rỗng.
         """
+        if self.is_pt:
+            results = self.model(image, conf=self.conf_thresh, iou=0.30, classes=[0, 2], imgsz=(self.img_height, self.img_width), verbose=False)
+            final_bboxes = []
+            final_confs = []
+            final_class_ids = []
+            if len(results) > 0 and len(results[0].boxes) > 0:
+                boxes = results[0].boxes
+                for box in boxes:
+                    x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
+                    conf = float(box.conf[0].cpu().numpy())
+                    cls_id = int(box.cls[0].cpu().numpy())
+                    
+                    if cls_id in self.coco_to_id:
+                        w = float(x2 - x1)
+                        h = float(y2 - y1)
+                        if w > 0 and h > 0:
+                            final_bboxes.append([float(x1), float(y1), w, h])
+                            final_confs.append(conf)
+                            final_class_ids.append(self.coco_to_id[cls_id])
+            
+            if not final_bboxes:
+                return (np.empty((0, 4), dtype=np.float32), 
+                        np.empty((0,), dtype=np.float32), 
+                        np.empty((0,), dtype=np.int32))
+                        
+            return (np.array(final_bboxes, dtype=np.float32), 
+                    np.array(final_confs, dtype=np.float32), 
+                    np.array(final_class_ids, dtype=np.int32))
+
         # 1. TIỀN XỬ LÝ
         img_padded = self._letterbox(image, new_shape=(self.img_width, self.img_height))
         

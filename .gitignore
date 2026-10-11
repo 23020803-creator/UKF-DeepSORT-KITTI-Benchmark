@@ -217,3 +217,9 @@ outputs/
 scratch/
 
 TrackEval_Workspace_*
+
+# BDD100K dataset
+bdd100k
+bdd100k/
+bdd100k.zip
+

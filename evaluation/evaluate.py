@@ -73,7 +73,7 @@ def main():
 
     # 2. Khởi tạo các mạng AI (Tối ưu: Chỉ khởi tạo 1 lần ngoài vòng lặp để tránh tràn RAM)
     print("\n[INFO] Đang tải các mô hình AI lên bộ nhớ...")
-    detector = YOLODetector(model_path="weights/yolo26n_int8_openvino_model", conf_thresh=CONF_THRESHOLD)
+    detector = YOLODetector(model_path="weights/yolo26n.pt", conf_thresh=CONF_THRESHOLD)
     reid = ReIDExtractor(model_path="weights/unified/unified_reid_int8.xml", device="CPU")
     print("[SUCCESS] Tải mô hình thành công!\n")
 
