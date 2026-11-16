@@ -42,8 +42,12 @@ void Visualizer::draw(cv::Mat& image, const std::vector<TrackResult>& results, d
             cv::line(image, pts[i - 1], pts[i], color, 2);
         }
 
-        // Vẽ nhãn văn bản
-        std::string cls_str = (res.class_id == 2) ? "Car" : "Ped";
+        // Vẽ nhãn văn bản (6 lớp giao thông thực tế: Person, Bicycle, Car, Motorbike, Bus, Truck)
+        static const std::vector<std::string> traffic_class_names = {
+            "Person", "Bicycle", "Car", "Motorbike", "Bus", "Truck"
+        };
+        std::string cls_str = (res.class_id >= 0 && res.class_id < static_cast<int>(traffic_class_names.size()))
+                              ? traffic_class_names[res.class_id] : ("Class " + std::to_string(res.class_id));
         std::string label = "ID:" + std::to_string(res.track_id) + " " + cls_str;
 
         int baseLine = 0;

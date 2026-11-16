@@ -42,8 +42,15 @@ class Visualizer:
         np.random.seed(42)
         self.colors_palette = np.random.randint(0, 255, size=(1000, 3), dtype=int)
         
-        # Từ điển ánh xạ từ Class ID sang String
-        self.class_names = {0: "Person", 1: "Cyclist", 2: "Car"}
+        # Từ điển ánh xạ từ Class ID sang String (6 lớp đối tượng giao thông thực tế)
+        self.class_names = {
+            0: "Person",
+            1: "Bicycle",
+            2: "Car",
+            3: "Motorbike",
+            4: "Bus",
+            5: "Truck"
+        }
 
     def _get_color(self, track_id):
         """

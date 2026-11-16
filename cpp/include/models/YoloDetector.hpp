@@ -14,12 +14,12 @@ namespace ukf_deepsort {
  */
 class YoloDetector {
 public:
-    explicit YoloDetector(const std::string& engine_path, float conf_thresh = 0.55f, float nms_thresh = 0.45f);
+    explicit YoloDetector(const std::string& engine_path, float conf_thresh = 0.50f, float nms_thresh = 0.45f, int num_classes = 6);
 
     /**
      * @brief Thực hiện phát hiện vật thể trên ảnh gốc BGR.
      * @param image Ảnh đầu vào (BGR).
-     * @return std::vector<Detection> Danh sách các đối tượng phát hiện được (Class 0: Người, Class 2: Xe).
+     * @return std::vector<Detection> Danh sách các đối tượng phát hiện được (Class 0: Person, 1: Bicycle, 2: Car, 3: Motorbike, 4: Bus, 5: Truck).
      */
     std::vector<Detection> detect(const cv::Mat& image);
 
@@ -27,8 +27,9 @@ public:
 
 private:
     std::unique_ptr<TrtEngine> engine_;
-    float conf_thresh_{0.55f};
+    float conf_thresh_{0.50f};
     float nms_thresh_{0.45f};
+    int num_classes_{6};
 
     int input_w_{640};
     int input_h_{640};

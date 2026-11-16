@@ -1,19 +1,26 @@
 """
-Kịch bản kiểm thử luồng thực thi (Test Pipeline) trên một chuỗi video đơn lẻ.
+Kịch bản chạy thử nghiệm luồng theo dõi đối tượng giao thông (Traffic Multi-Object Tracking Pipeline).
 
-Mô đun này kết hợp toàn bộ các thành phần của hệ thống: YOLO (Nhận diện), 
-ReID (Trích xuất đặc trưng ngoại hình), Sparse Optical Flow (Bù trừ chuyển động), 
-và Unscented Kalman Filter (Theo dõi quỹ đạo). 
-Đồng thời, tích hợp module Visualizer để hiển thị trực tiếp và lưu video kết quả,
-kèm theo logic in ra các thông số nội bộ (Debug) của UKF ở các khung hình chỉ định.
+Tích hợp hoàn chỉnh:
+  1. YOLO Detector (Mô hình YOLO26n 6 lớp giao thông: Person, Bicycle, Car, Motorbike, Bus, Truck)
+  2. Unified ReID Extractor (MobileNetV4 128x128 -> Vector 256 chiều)
+  3. CMC (Sparse Optical Flow bù trừ rung lắc/chuyển động camera)
+  4. UKF Tracker (Unscented Kalman Filter mô hình hóa phi tuyến + Gán cặp Hungarian đa tầng)
+  5. Visualizer (Hiển thị Bounding Box, quỹ đạo, nhãn ID và xuất video .mp4)
+
+Hỗ trợ nguồn đầu vào:
+  - Tệp video bất kỳ (.mp4, .avi, .mkv)
+  - Webcam / Camera USB hoặc Camera CSI (0, 1)
+  - Thư mục chuỗi ảnh (Image sequence folder)
 """
-
-import time
-import numpy as np
-import cv2
 
 import os
 import sys
+import time
+import argparse
+from pathlib import Path
+import cv2
+import numpy as np
 
 current_dir = os.path.dirname(os.path.abspath(__file__))
 project_root = os.path.dirname(current_dir)
@@ -27,121 +34,295 @@ from src.extractor.extractor import ReIDExtractor
 from src.tracker.tracker import Tracker
 from src.cmc.cmc import SparseOpticalFlowCMC
 
-def main():
-    """
-    Hàm thực thi chính của chương trình kiểm thử.
 
-    Quy trình thực hiện:
-    1. Khởi tạo cấu hình và nạp các mô hình AI (YOLO, OSNet, Intel ReID).
-    2. Khởi tạo lõi toán học (CMC, Tracker) và công cụ hiển thị (Visualizer).
-    3. Xử lý tuần tự từng khung hình qua 5 bước: CMC -> YOLO -> ReID -> UKF -> Vẽ.
-    4. Ghi nhận và in ra thời gian trễ (latency) của từng module ở mỗi khung hình.
-    5. Hiển thị luồng video thời gian thực và đóng gói tệp video khi kết thúc.
-    """
-    print("[INFO] === PIPELINE: DEEPSORT + UKF + CMC (OOP REFACTORED) ===")
-    
-    SCALE_FACTOR = 1.0 
-    NMS_THRESHOLD = 0.4 
-    CONF_THRESHOLD = 0.55
-    FPS = 10 
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="Chạy kiểm thử hệ thống Autonomous Traffic Tracker (YOLO + ReID + UKF + CMC)"
+    )
+    parser.add_argument(
+        "--input",
+        type=str,
+        default="",
+        help="Đường dẫn file video (.mp4), webcam index ('0'), hoặc thư mục ảnh",
+    )
+    parser.add_argument(
+        "--weights",
+        type=str,
+        default="weights/yolo26n_traffic_best.pt",
+        help="Đường dẫn file trọng số YOLO PyTorch (.pt)",
+    )
+    parser.add_argument(
+        "--reid",
+        type=str,
+        default="",
+        help="Đường dẫn mô hình ReID (.onnx hoặc .xml). Để trống sẽ tự động dò tìm",
+    )
+    parser.add_argument(
+        "--conf",
+        type=float,
+        default=0.50,
+        help="Ngưỡng tự tin (confidence threshold) của YOLO",
+    )
+    parser.add_argument(
+        "--output",
+        type=str,
+        default="outputs/videos/tracking_result.mp4",
+        help="Đường dẫn lưu video kết quả đầu ra (.mp4)",
+    )
+    parser.add_argument(
+        "--max-frames",
+        type=int,
+        default=0,
+        help="Số khung hình tối đa cần xử lý (0 = xử lý toàn bộ video)",
+    )
+    parser.add_argument(
+        "--show",
+        action="store_true",
+        default=False,
+        help="Hiển thị cửa sổ trực tiếp OpenCV khi đang xử lý",
+    )
+    parser.add_argument(
+        "--scale",
+        type=float,
+        default=1.0,
+        help="Tỉ lệ thu nhỏ khung hình đầu vào (ví dụ 0.5 để tăng tốc)",
+    )
+    return parser.parse_args()
 
-    # Khởi tạo đọc dữ liệu và công cụ trực quan hóa
-    parser = KittiParser(seq_dir="datasets/KITTI_MOT/KITTI-0000")
-    visualizer = Visualizer(output_path="outputs/videos/test_ukf_cmc.mp4", fps=FPS)
-    
-    # Khởi tạo các mô hình Deep Learning
-    detector = YOLODetector(model_path="weights/yolo26n_int8_openvino_model", conf_thresh=CONF_THRESHOLD)
-    reid = ReIDExtractor(model_path="weights/unified/unified_reid_int8.xml", device="CPU")
-    
-    # Khởi tạo công cụ đo chuyển động máy ảnh
-    cmc_engine = SparseOpticalFlowCMC()
-    
-    # Khởi tạo lõi theo dõi quỹ đạo
-    tracker = Tracker(max_age=30, n_init=3, cosine_threshold=0.35, iou_threshold=0.7, fps=FPS)
-    
-    VEHICLE_CLASSES = [2, 3, 5, 7] 
-    
-    for frame_idx, image, _ in parser.get_frame():
-        frame_start_time = time.time()
 
-        if SCALE_FACTOR != 1.0:
-            image = cv2.resize(image, (0, 0), fx=SCALE_FACTOR, fy=SCALE_FACTOR)
-            
-        img_h, img_w = image.shape[:2]
-            
-        # Bước 1: Tính toán bù trừ chuyển động (CMC)
-        t_cmc_start = time.time()
-        H_camera = cmc_engine.apply(image)
-        cmc_time = (time.time() - t_cmc_start) * 1000
+def resolve_input_source(input_arg):
+    """Xác định nguồn video/ảnh đầu vào từ tham số hoặc tự động tìm kiếm file mẫu."""
+    if input_arg:
+        # Trường hợp nhập webcam index
+        if input_arg.isdigit():
+            return int(input_arg), "webcam"
+        p = Path(input_arg)
+        if p.is_file():
+            return str(p), "video"
+        if p.is_dir():
+            return str(p), "dir"
 
-        # Bước 2: Phát hiện vật thể bằng YOLO (đã tích hợp NMS phân biệt từng lớp)
-        t_yolo_start = time.time()
-        valid_bboxes, valid_confs, valid_class_ids = detector.detect(image)
-        yolo_time = (time.time() - t_yolo_start) * 1000
+    # Tự động dò tìm các file video có sẵn trong project
+    candidates = [
+        "datasets/VID_20261020_145051.mp4",
+        "outputs/videos/test_ukf_cmc.mp4",
+        "datasets/KITTI_MOT/KITTI-0000",
+    ]
+    for c in candidates:
+        if os.path.exists(c):
+            if os.path.isfile(c):
+                return c, "video"
+            if os.path.isdir(c):
+                return c, "dir"
 
-        # Bước 3: Trích xuất đặc trưng ReID bằng mô hình Unified ReID duy nhất
-        t_reid_start = time.time()
-        if len(valid_bboxes) > 0:
-            features = reid.extract(image, valid_bboxes)
+    return 0, "webcam"
+
+
+def resolve_reid_model(reid_arg):
+    """Tìm kiếm file mô hình ReID phù hợp nhất trong thư mục weights."""
+    if reid_arg and os.path.exists(reid_arg):
+        return reid_arg
+
+    candidates = [
+        "weights/unified/unified_reid.onnx",
+        "weights/unified/unified_reid_int8.xml",
+        "weights/unified/unified_reid_fp16.xml",
+        "weights/public/vehicle-reid-0001/osnet_ain_x1_0_vehicle_reid.onnx",
+    ]
+    for c in candidates:
+        if os.path.exists(c):
+            return c
+
+    return "weights/unified/unified_reid.onnx"
+
+
+def create_frame_generator(src, src_type):
+    """Tạo generator cung cấp tuần tự (frame_idx, frame, fps)."""
+    if src_type in ("video", "webcam"):
+        cap = cv2.VideoCapture(src)
+        if not cap.isOpened():
+            raise RuntimeError(f"Không thể mở nguồn video/camera: {src}")
+
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        if fps <= 0 or np.isnan(fps):
+            fps = 25.0
+
+        def gen():
+            idx = 0
+            while True:
+                ret, frame = cap.read()
+                if not ret or frame is None:
+                    break
+                idx += 1
+                yield idx, frame, fps
+            cap.release()
+
+        return gen(), fps
+
+    elif src_type == "dir":
+        # Thư mục ảnh KITTI MOT hoặc thư mục ảnh thông thường
+        if os.path.isdir(os.path.join(src, "img1")):
+            parser = KittiParser(src)
+            fps = 10.0
+
+            def gen():
+                for idx, frame, _ in parser.get_frame():
+                    yield idx, frame, fps
+
+            return gen(), fps
         else:
-            features = np.zeros((0, 256), dtype=np.float32)
-        time_reid_total = (time.time() - t_reid_start) * 1000
+            # Thư mục ảnh thường
+            valid_exts = (".jpg", ".jpeg", ".png", ".bmp")
+            files = sorted([os.path.join(src, f) for f in os.listdir(src) if f.lower().endswith(valid_exts)])
+            fps = 25.0
 
-        # Bước 4: Đẩy dữ liệu vào Tracker (Lọc UKF + Ghép cặp Hungarian)
-        t_tracker_start = time.time()
-        tracker.update(valid_bboxes, valid_confs, valid_class_ids, features, frame_shape=(img_h, img_w), H_camera=H_camera, frame_idx=frame_idx)
-        tracker_time = (time.time() - t_tracker_start) * 1000
+            def gen():
+                for idx, f in enumerate(files, start=1):
+                    frame = cv2.imread(f)
+                    if frame is not None:
+                        yield idx, frame, fps
 
-        # =====================================================================
-        # LOGIC IN RA MÀN HÌNH GỠ LỖI (DEBUG TRẠNG THÁI UKF)
-        # Chỉ theo dõi và in log chi tiết từ frame 35 đến 65
-        # =====================================================================
-        if 35 <= frame_idx <= 65:
-            print(f"[DEBUG] --- Đang phân tích nội bộ Frame {frame_idx} ---")
-            found_ids = []
-            
-            for trk in tracker.tracks:
-                # Chỉ soi chiếu chi tiết cho đối tượng có ID là 2 và 9
-                if trk.track_id in [2, 9]:
-                    found_ids.append(trk.track_id)
-                    if trk.state == 1: state_str = "TENTATIVE (Chờ duyệt)"
-                    elif trk.state == 2: state_str = "CONFIRMED (Đang bám)"
-                    else: state_str = "DELETED (Đã xóa)"
-                    
-                    ukf_x, ukf_y, ukf_w, ukf_h = trk.to_tlwh()
-                    vx, vy, omega, vh = trk.ukf.mean[4], trk.ukf.mean[5], trk.ukf.mean[6], trk.ukf.mean[7]
-                    
-                    print(f"  [>] ID: {trk.track_id} | State: {state_str}")
-                    print(f"      - Mất dấu: {trk.time_since_update} frames | Hộp bao: X:{ukf_x:.1f}, Y:{ukf_y:.1f}, W:{ukf_w:.1f}, H:{ukf_h:.1f}")
-                    print(f"      - Động học: vx={vx:.2f}, vy={vy:.2f} | Cua(omega)={omega:.4f} | Giãn nở(vh)={vh:.2f}")
-                    
-            for target_id in [2, 9]:
-                if target_id not in found_ids:
-                    print(f"  [!] ID: {target_id} | Đã BỊ XÓA HẲN khỏi bộ nhớ hệ thống.")
-        # =====================================================================
-        
-        # Bước 5: Thu thập kết quả và Vẽ khung hình
-        t_draw_start = time.time()
-        draw_data = tracker.get_results()
-        drawn_img = visualizer.draw_tracks(image, draw_data, frame_idx)
-        draw_time = (time.time() - t_draw_start) * 1000
-        
-        # Đo lường tổng thời gian và tính toán FPS
-        total_time = time.time() - frame_start_time
-        fps = 1.0 / total_time
-        
-        print(f"[INFO] Frame: {frame_idx:04d} | Object: {len(draw_data):02d} | CMC: {cmc_time:4.1f}ms | YOLO: {yolo_time:4.1f}ms | ReID: {time_reid_total:4.1f}ms | UKF: {tracker_time:4.1f}ms | Draw: {draw_time:4.1f}ms | FPS: {fps:4.1f}")
-        
-        # Hiển thị trực tiếp (Real-time GUI)
-        cv2.imshow("Test Pipeline UKF + CMC", drawn_img)
-        # Nhấn phím 'ESC' (Mã 27) để thoát vòng lặp
-        if cv2.waitKey(1) & 0xFF == 27:
-            break
+            return gen(), fps
 
-    # Giải phóng tài nguyên bộ nhớ
+    raise ValueError(f"Loại nguồn không hợp lệ: {src_type}")
+
+
+def main():
+    args = parse_args()
+
+    input_src, src_type = resolve_input_source(args.input)
+    reid_path = resolve_reid_model(args.reid)
+
+    print("=" * 80)
+    print("🚀 KHỞI ĐỘNG HỆ THỐNG AUTONOMOUS TRAFFIC TRACKER (LAPTOP PIPELINE)")
+    print("=" * 80)
+    print(f"[CẤU HÌNH] Nguồn video/camera : {input_src} ({src_type})")
+    print(f"[CẤU HÌNH] YOLO Detector       : {args.weights} (conf={args.conf})")
+    print(f"[CẤU HÌNH] ReID Extractor     : {reid_path}")
+    print(f"[CẤU HÌNH] Lưu video kết quả  : {args.output}")
+    print(f"[CẤU HÌNH] Giới hạn số frame  : {args.max_frames if args.max_frames > 0 else 'Toàn bộ'}")
+    print("=" * 80)
+
+    # 1. Khởi tạo nguồn khung hình
+    frame_gen, detected_fps = create_frame_generator(input_src, src_type)
+    fps = max(1.0, min(60.0, float(detected_fps)))
+
+    # 2. Khởi tạo Visualizer
+    visualizer = Visualizer(output_path=args.output, fps=int(round(fps)))
+
+    # 3. Khởi tạo các module mô hình AI
+    print("\n[1/4] Nạp mô hình phát hiện đối tượng YOLO...")
+    detector = YOLODetector(model_path=args.weights, conf_thresh=args.conf)
+
+    print("\n[2/4] Nạp mô hình trích xuất đặc trưng ngoại hình ReID...")
+    reid = ReIDExtractor(model_path=reid_path, device="CPU")
+
+    print("\n[3/4] Khởi tạo bộ bù trừ chuyển động camera (CMC - Sparse Optical Flow)...")
+    cmc_engine = SparseOpticalFlowCMC()
+
+    print("\n[4/4] Khởi tạo lõi theo dõi Unscented Kalman Filter (UKF Tracker)...")
+    tracker = Tracker(
+        max_age=30,
+        n_init=3,
+        cosine_threshold=0.35,
+        iou_threshold=0.70,
+        fps=fps,
+    )
+
+    print("\n" + "-" * 80)
+    print("🎬 BẮT ĐẦU XỬ LÝ VIDEO...")
+    print("-" * 80)
+
+    total_start_time = time.time()
+    processed_count = 0
+
+    try:
+        for frame_idx, image, _ in frame_gen:
+            if args.max_frames > 0 and processed_count >= args.max_frames:
+                print(f"\n[INFO] Đã đạt giới hạn {args.max_frames} khung hình yêu cầu.")
+                break
+
+            processed_count += 1
+            frame_start = time.time()
+
+            if args.scale != 1.0:
+                image = cv2.resize(image, (0, 0), fx=args.scale, fy=args.scale)
+
+            img_h, img_w = image.shape[:2]
+
+            # Bước 1: CMC (Ước lượng chuyển động của camera)
+            t_cmc = time.time()
+            H_camera = cmc_engine.apply(image)
+            cmc_ms = (time.time() - t_cmc) * 1000
+
+            # Bước 2: YOLO Detection (Nhận diện 6 lớp đối tượng)
+            t_yolo = time.time()
+            valid_bboxes, valid_confs, valid_class_ids = detector.detect(image)
+            yolo_ms = (time.time() - t_yolo) * 1000
+
+            # Bước 3: Unified ReID (Trích xuất đặc trưng 256D)
+            t_reid = time.time()
+            if len(valid_bboxes) > 0:
+                features = reid.extract(image, valid_bboxes)
+            else:
+                features = np.zeros((0, 256), dtype=np.float32)
+            reid_ms = (time.time() - t_reid) * 1000
+
+            # Bước 4: UKF Tracker Update (Dự đoán động học + Ghép cặp Hungarian)
+            t_trk = time.time()
+            tracker.update(
+                valid_bboxes,
+                valid_confs,
+                valid_class_ids,
+                features,
+                frame_shape=(img_h, img_w),
+                H_camera=H_camera,
+                frame_idx=frame_idx,
+            )
+            trk_ms = (time.time() - t_trk) * 1000
+
+            # Bước 5: Trực quan hóa và ghi video
+            t_draw = time.time()
+            draw_data = tracker.get_results()
+            drawn_img = visualizer.draw_tracks(image, draw_data, frame_idx)
+            draw_ms = (time.time() - t_draw) * 1000
+
+            frame_elapsed = time.time() - frame_start
+            cur_fps = 1.0 / max(1e-4, frame_elapsed)
+
+            if processed_count % 5 == 0 or processed_count <= 10:
+                print(
+                    f"[FRAME {frame_idx:04d}] Objects: {len(draw_data):02d} | "
+                    f"CMC: {cmc_ms:4.1f}ms | YOLO: {yolo_ms:4.1f}ms | "
+                    f"ReID: {reid_ms:4.1f}ms | UKF: {trk_ms:4.1f}ms | "
+                    f"FPS: {cur_fps:4.1f}"
+                )
+
+            if args.show:
+                cv2.imshow("Autonomous Traffic Tracker (UKF + YOLO + ReID)", drawn_img)
+                if cv2.waitKey(1) & 0xFF == 27:  # ESC
+                    print("\n[INFO] Người dùng nhấn ESC để dừng.")
+                    break
+
+    except KeyboardInterrupt:
+        print("\n[INFO] Dừng chương trình theo tín hiệu người dùng.")
+
     visualizer.release()
-    cv2.destroyAllWindows()
-    print("[SUCCESS] === HOÀN THÀNH QUÁ TRÌNH KIỂM THỬ ===")
+    if args.show:
+        cv2.destroyAllWindows()
+
+    total_elapsed = time.time() - total_start_time
+    avg_fps = processed_count / max(1e-4, total_elapsed)
+
+    print("\n" + "=" * 80)
+    print("✅ HOÀN TẤT QUÁ TRÌNH CHẠY THỬ NGHIỆM!")
+    print("=" * 80)
+    print(f"📊 Tổng số frame đã xử lý : {processed_count}")
+    print(f"⏱️ Tổng thời gian thực thi : {total_elapsed:.2f} giây")
+    print(f"🚀 Tốc độ trung bình       : {avg_fps:.2f} FPS")
+    print(f"🎥 Video kết quả đã lưu tại: {args.output}")
+    print("=" * 80)
+
 
 if __name__ == "__main__":
     main()

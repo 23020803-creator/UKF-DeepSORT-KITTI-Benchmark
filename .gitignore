@@ -214,6 +214,8 @@ frames/
 extract_frames.py
 TrackEval_Workspace*/
 outputs/
+# Local annotation workspaces and CVAT upload archives
+/annotations/cvat/
 scratch/
 
 TrackEval_Workspace_*
@@ -222,4 +224,13 @@ TrackEval_Workspace_*
 bdd100k
 bdd100k/
 bdd100k.zip
+
+# YOLO runs & caches
+runs/
+*.cache
+*.zip
+
+# Error logs & local IDE
+kernel.errors.txt
+.vscode/
 

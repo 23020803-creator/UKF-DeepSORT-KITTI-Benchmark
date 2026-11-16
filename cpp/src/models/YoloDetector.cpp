@@ -4,12 +4,13 @@
 
 namespace ukf_deepsort {
 
-YoloDetector::YoloDetector(const std::string& engine_path, float conf_thresh, float nms_thresh)
-    : conf_thresh_(conf_thresh), nms_thresh_(nms_thresh) {
+YoloDetector::YoloDetector(const std::string& engine_path, float conf_thresh, float nms_thresh, int num_classes)
+    : conf_thresh_(conf_thresh), nms_thresh_(nms_thresh), num_classes_(num_classes) {
     engine_ = std::make_unique<TrtEngine>(engine_path);
     input_buffer_.resize(1 * 3 * input_h_ * input_w_, 0.0f);
-    // YOLOv8/11/26 output: [1, 84, 8400]
-    output_buffer_.resize(1 * 84 * 8400, 0.0f);
+    // YOLO output: [1, 4 + num_classes, 8400]
+    int num_channels = 4 + num_classes_;
+    output_buffer_.resize(1 * num_channels * 8400, 0.0f);
 }
 
 void YoloDetector::preprocess(const cv::Mat& image, float& scale, int& pad_x, int& pad_y) {
@@ -88,8 +89,8 @@ void YoloDetector::nms(std::vector<Detection>& dets, float nms_thresh) {
 std::vector<Detection> YoloDetector::postprocess(const cv::Mat& image, float scale, int pad_x, int pad_y) {
     std::vector<Detection> raw_dets;
 
-    // Output shape [1, 84, 8400]: 84 channels (4 box coords + 80 classes) x 8400 anchors
-    constexpr int NUM_CHANNELS = 84;
+    // Output shape: [1, 4 + num_classes, 8400]
+    const int num_channels = 4 + num_classes_;
     constexpr int NUM_ANCHORS = 8400;
 
     for (int i = 0; i < NUM_ANCHORS; ++i) {
@@ -97,7 +98,7 @@ std::vector<Detection> YoloDetector::postprocess(const cv::Mat& image, float sca
         float max_score = 0.0f;
         int max_cls = -1;
 
-        for (int c = 0; c < 80; ++c) {
+        for (int c = 0; c < num_classes_; ++c) {
             float score = output_buffer_[(4 + c) * NUM_ANCHORS + i];
             if (score > max_score) {
                 max_score = score;
@@ -105,8 +106,8 @@ std::vector<Detection> YoloDetector::postprocess(const cv::Mat& image, float sca
             }
         }
 
-        // Chỉ lọc Person (Class 0) và Car (Class 2)
-        if ((max_cls == 0 || max_cls == 2) && max_score >= conf_thresh_) {
+        // Lọc theo ngưỡng confidence
+        if (max_cls >= 0 && max_score >= conf_thresh_) {
             float cx = output_buffer_[0 * NUM_ANCHORS + i];
             float cy = output_buffer_[1 * NUM_ANCHORS + i];
             float w  = output_buffer_[2 * NUM_ANCHORS + i];

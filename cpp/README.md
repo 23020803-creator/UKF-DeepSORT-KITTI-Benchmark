@@ -24,19 +24,26 @@ sudo apt-get install -y build-essential cmake git libeigen3-dev libopencv-dev
 
 ## 2. Bước 1: Biên Dịch TensorRT Engine (Chạy trên Jetson Nano)
 
-Từ thư mục gốc dự án, sử dụng công cụ `trtexec` để biên dịch các file `.onnx` sang `.engine` FP16:
+Từ thư mục gốc dự án, bạn có 2 cách xuất Engine TensorRT FP16:
 
+### Cách 1: Sử dụng lệnh yolo export (Khuyến nghị, nhanh nhất)
 ```bash
-# 1. Biên dịch YOLO Detection
+yolo export model=weights/yolo26n_traffic_best.pt format=engine half=True imgsz=640 device=0
+# Lệnh trên sẽ sinh ra file weights/yolo26n_traffic_best.engine
+```
+
+### Cách 2: Sử dụng công cụ `trtexec` của JetPack
+```bash
+# 1. Biên dịch YOLO Detection (6 classes Traffic fine-tuned)
 /usr/src/tensorrt/bin/trtexec \
-    --onnx=../weights/yolo26n.onnx \
-    --saveEngine=../weights/yolo26n_fp16.engine \
+    --onnx=weights/yolo26n_traffic_best.onnx \
+    --saveEngine=weights/yolo26n_fp16.engine \
     --fp16
 
 # 2. Biên dịch Unified ReID (MobileNetV4 128x128 256D)
 /usr/src/tensorrt/bin/trtexec \
-    --onnx=../weights/unified/unified_reid.onnx \
-    --saveEngine=../weights/unified/unified_reid_fp16.engine \
+    --onnx=weights/unified/unified_reid.onnx \
+    --saveEngine=weights/unified/unified_reid_fp16.engine \
     --fp16
 ```
 

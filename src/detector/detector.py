@@ -1,10 +1,14 @@
 """
-Mô đun YOLO Detector tối ưu hóa bằng OpenVINO Toolkit.
+Mô đun YOLO Detector hỗ trợ đầy đủ 6 lớp đối tượng giao thông (Traffic Multi-Class Tracking).
 
-Cung cấp lõi thực thi suy luận (Inference Engine) cho mạng YOLO11n. 
-Tích hợp quy trình tiền xử lý ảnh (Letterbox Resizing) để giữ nguyên tỷ lệ, 
-chạy suy luận trực tiếp trên CPU và hậu xử lý NMS (Non-Maximum Suppression).
-Chỉ tập trung nhận diện Người (Person) và Xe ô tô (Car).
+Hỗ trợ nạp trực tiếp mô hình PyTorch (.pt) hoặc TensorRT Engine (.engine) cho Jetson Nano.
+Định dạng 6 lớp đối tượng giao thông chuẩn hóa:
+  0: Person (Người đi bộ)
+  1: Bicycle (Xe đạp / Người đi xe đạp)
+  2: Car (Xe ô tô con)
+  3: Motorbike (Xe máy / Người lái xe máy)
+  4: Bus (Xe buýt)
+  5: Truck (Xe tải)
 """
 
 import os
@@ -12,111 +16,82 @@ import glob
 import cv2
 import numpy as np
 import torch
-import openvino as ov
+from pathlib import Path
 
-try:
-    from ultralytics.utils.ops import non_max_suppression, scale_boxes
-except ImportError:
-    from ultralytics.utils.nms import non_max_suppression
-    from ultralytics.utils.ops import scale_boxes
 
 class YOLODetector:
     """
-    Lớp đóng gói mô hình YOLO chạy trên nền tảng OpenVINO.
+    Lớp đóng gói mô hình YOLO Detector hỗ trợ 6 lớp giao thông.
 
     Attributes:
         conf_thresh (float): Ngưỡng tự tin tối thiểu để giữ lại Bounding Box.
         img_width (int): Chiều rộng ảnh chuẩn hóa đầu vào của mô hình.
         img_height (int): Chiều cao ảnh chuẩn hóa đầu vào của mô hình.
-        core (openvino.runtime.Core): Lõi thực thi OpenVINO.
-        compiled_model (openvino.runtime.CompiledModel): Mô hình đã được biên dịch cho thiết bị hiện tại.
-        output_layer (openvino.runtime.ConstOutput): Lớp đầu ra của mô hình.
-        coco_to_id (dict): Từ điển ánh xạ từ ID của bộ dữ liệu COCO sang ID tùy chỉnh của hệ thống.
+        classes_map (dict): Tên ánh xạ 6 lớp đối tượng giao thông.
     """
 
-    def __init__(self, model_path="weights/yolo26n_int8_openvino_model", conf_thresh=0.7):
+    # Bảng 6 lớp đối tượng chuẩn của hệ thống giám sát giao thông
+    TRAFFIC_CLASSES = {
+        0: "Person",
+        1: "Bicycle",
+        2: "Car",
+        3: "Motorbike",
+        4: "Bus",
+        5: "Truck",
+    }
+
+    # Ánh xạ từ COCO 80 classes sang 6 classes Traffic (nếu dùng model COCO gốc chưa fine-tune)
+    COCO_TO_TRAFFIC = {
+        0: 0,  # person -> Person
+        1: 1,  # bicycle -> Bicycle
+        2: 2,  # car -> Car
+        3: 3,  # motorcycle -> Motorbike
+        5: 4,  # bus -> Bus
+        7: 5,  # truck -> Truck
+    }
+
+    def __init__(self, model_path="weights/yolo26n_traffic_best.pt", conf_thresh=0.5):
         """
-        Khởi tạo YOLODetector, nạp và biên dịch mô hình lên CPU.
+        Khởi tạo YOLODetector hỗ trợ đầy đủ 6 lớp đối tượng giao thông.
 
         Args:
-            model_path (str): Đường dẫn tới thư mục chứa tệp mô hình OpenVINO, tệp .xml hoặc tệp .pt.
+            model_path (str): Đường dẫn tới file trọng số .pt hoặc mô hình engine.
             conf_thresh (float): Ngưỡng tự tin (confidence threshold) cho NMS.
         """
         self.conf_thresh = conf_thresh
-        
-        self.img_width = 960  
-        self.img_height = 288 
-        self.is_pt = model_path.endswith('.pt')
+        self.img_width = 640
+        self.img_height = 640
 
-        # Chỉ giữ lại Person (0) và Car (2), loại bỏ các class không cần thiết
-        self.coco_to_id = {
-            0: 0,  # person -> Person
-            2: 2,  # car -> Car
-        }
-        
+        # Tự động chuyển fallback nếu model_path chưa tồn tại
+        if not os.path.exists(model_path):
+            candidates = [
+                "weights/yolo26n_traffic_best.pt",
+                "weights/yolo26n_best.pt",
+                "weights/best.pt",
+                "weights/yolo26n.pt",
+            ]
+            for c in candidates:
+                if os.path.exists(c):
+                    print(f"[INFO] '{model_path}' không tồn tại, tự động chuyển sang: {c}")
+                    model_path = c
+                    break
+
+        self.model_path = model_path
+        self.is_pt = model_path.endswith(".pt") or model_path.endswith(".engine")
+
         if self.is_pt:
             from ultralytics import YOLO
-            print(f"[INFO] Nạp mô hình PyTorch từ: {model_path}")
+            print(f"[INFO] Nạp mô hình từ: {model_path}")
             self.model = YOLO(model_path)
-            print(f"[SUCCESS] Đã load model PyTorch!")
+            self.num_classes = len(self.model.names) if hasattr(self.model, "names") else 6
+            print(f"[SUCCESS] Đã nạp YOLO ({self.num_classes} classes trong checkpoint)!")
+            if self.num_classes == 6:
+                print(f"[INFO] Đang sử dụng mô hình Fine-tuned 6 lớp giao thông: {list(self.TRAFFIC_CLASSES.values())}")
+            else:
+                print(f"[INFO] Đang sử dụng mô hình gốc COCO, tự động lọc và ánh xạ sang 6 lớp giao thông.")
             return
-            
-        print("[INFO] Đang khởi tạo Lõi OpenVINO (Native Core)...")
-        self.core = ov.Core()
-        
-        if os.path.isfile(model_path) and model_path.endswith('.xml'):
-            xml_path = model_path
-        elif os.path.isdir(model_path):
-            xml_candidates = glob.glob(os.path.join(model_path, "*.xml"))
-            if not xml_candidates:
-                raise FileNotFoundError(f"Không tìm thấy tệp .xml nào trong: {model_path}")
-            # Ưu tiên yolo26n.xml hoặc yolo11n.xml nếu có
-            preferred = [f for f in xml_candidates if "yolo26" in f or "yolo11" in f]
-            xml_path = preferred[0] if preferred else xml_candidates[0]
-        else:
-            xml_path = model_path
-            
-        print(f"[INFO] Nạp mô hình OpenVINO từ: {xml_path}")
-        model = self.core.read_model(model=xml_path)
-        
-        self.compiled_model = self.core.compile_model(model=model, device_name="CPU")
-        self.output_layer = self.compiled_model.output(0)
-        print(f"[SUCCESS] Đã load và biên dịch model trực tiếp lên CPU! Đầu ra shape: {self.output_layer.partial_shape}")
 
-    def _letterbox(self, img, new_shape=(960, 288), color=(114, 114, 114)):
-        """
-        Thay đổi kích thước ảnh (Resize) và thêm viền (Padding) để giữ nguyên tỷ lệ khung hình.
-        
-        Quá trình này ngăn chặn sự biến dạng vật thể (squishing/stretching),
-        giúp mô hình YOLO nhận diện chính xác hơn.
-
-        Args:
-            img (numpy.ndarray): Ảnh BGR đầu vào.
-            new_shape (tuple): Kích thước mục tiêu (chiều rộng, chiều cao).
-            color (tuple): Mã màu BGR của viền padding. Mặc định là xám (114, 114, 114).
-
-        Returns:
-            numpy.ndarray: Ảnh sau khi resize và thêm viền.
-        """
-        shape = img.shape[:2]  
-        
-        r = min(new_shape[0] / shape[1], new_shape[1] / shape[0])
-        new_unpad = int(round(shape[1] * r)), int(round(shape[0] * r)) 
-        
-        dw = new_shape[0] - new_unpad[0]  
-        dh = new_shape[1] - new_unpad[1]  
-        
-        dw /= 2  
-        dh /= 2  
-        
-        if shape[::-1] != new_unpad:
-            img = cv2.resize(img, new_unpad, interpolation=cv2.INTER_LINEAR)
-            
-        top, bottom = int(round(dh - 0.1)), int(round(dh + 0.1))
-        left, right = int(round(dw - 0.1)), int(round(dw + 0.1))
-        img = cv2.copyMakeBorder(img, top, bottom, left, right, cv2.BORDER_CONSTANT, value=color)
-        
-        return img
+        raise NotImplementedError(f"Định dạng mô hình không được hỗ trợ hoặc không tồn tại: {model_path}")
 
     def detect(self, image):
         """
@@ -129,87 +104,54 @@ class YOLODetector:
             tuple: Trả về 3 mảng numpy:
                 - bboxes (numpy.ndarray): Tọa độ hộp bao [x_top_left, y_top_left, width, height], shape (N, 4).
                 - confs (numpy.ndarray): Điểm tự tin của các nhận diện, shape (N,).
-                - class_ids (numpy.ndarray): ID phân loại đối tượng, shape (N,).
+                - class_ids (numpy.ndarray): ID phân loại đối tượng (0-5), shape (N,).
                 Nếu không phát hiện được gì, trả về các mảng rỗng.
         """
-        if self.is_pt:
-            results = self.model(image, conf=self.conf_thresh, iou=0.30, classes=[0, 2], imgsz=(self.img_height, self.img_width), verbose=False)
-            final_bboxes = []
-            final_confs = []
-            final_class_ids = []
-            if len(results) > 0 and len(results[0].boxes) > 0:
-                boxes = results[0].boxes
-                for box in boxes:
-                    x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
-                    conf = float(box.conf[0].cpu().numpy())
-                    cls_id = int(box.cls[0].cpu().numpy())
-                    
-                    if cls_id in self.coco_to_id:
-                        w = float(x2 - x1)
-                        h = float(y2 - y1)
-                        if w > 0 and h > 0:
-                            final_bboxes.append([float(x1), float(y1), w, h])
-                            final_confs.append(conf)
-                            final_class_ids.append(self.coco_to_id[cls_id])
-            
-            if not final_bboxes:
-                return (np.empty((0, 4), dtype=np.float32), 
-                        np.empty((0,), dtype=np.float32), 
-                        np.empty((0,), dtype=np.int32))
-                        
-            return (np.array(final_bboxes, dtype=np.float32), 
-                    np.array(final_confs, dtype=np.float32), 
-                    np.array(final_class_ids, dtype=np.int32))
+        if self.num_classes == 6:
+            query_classes = [0, 1, 2, 3, 4, 5]
+            map_cls = lambda c: c
+        else:
+            query_classes = list(self.COCO_TO_TRAFFIC.keys())  # [0, 1, 2, 3, 5, 7]
+            map_cls = lambda c: self.COCO_TO_TRAFFIC.get(c, -1)
 
-        # 1. TIỀN XỬ LÝ
-        img_padded = self._letterbox(image, new_shape=(self.img_width, self.img_height))
-        
-        img_blob = img_padded[:, :, ::-1].transpose(2, 0, 1)  
-        img_blob = np.ascontiguousarray(img_blob)
-        img_blob = img_blob.astype(np.float32) / 255.0
-        img_blob = np.expand_dims(img_blob, axis=0)
+        results = self.model(
+            image,
+            conf=self.conf_thresh,
+            iou=0.30,
+            classes=query_classes,
+            imgsz=self.img_width,
+            verbose=False,
+        )
 
-        # 2. INFERENCE (Chạy model qua OpenVINO)
-        raw_results = self.compiled_model([img_blob])[self.output_layer]
-
-        # 3. HẬU XỬ LÝ
-        preds = torch.from_numpy(raw_results)
-        
-        # Áp dụng Non-Maximum Suppression (NMS) với ngưỡng IoU là 0.30
-        preds = non_max_suppression(preds, conf_thres=self.conf_thresh, iou_thres=0.30, max_det=300)
-        
-        if len(preds) == 0 or len(preds[0]) == 0:
-            return (np.empty((0, 4), dtype=np.float32), 
-                    np.empty((0,), dtype=np.float32), 
-                    np.empty((0,), dtype=np.int32))
-
-        # Khôi phục tọa độ hộp bao về kích thước ảnh gốc
-        preds[0][:, :4] = scale_boxes(img_blob.shape[2:], preds[0][:, :4], image.shape).round()
-        
         final_bboxes = []
         final_confs = []
         final_class_ids = []
 
-        for det in preds[0]:
-            x1, y1, x2, y2, conf, cls = det[:6]
-            coco_cls_id = int(cls.item())
-            
-            # Chỉ xử lý nếu đối tượng nằm trong danh sách được cấp phép (Person, Car)
-            if coco_cls_id not in self.coco_to_id:
-                continue
-                
-            target_id = self.coco_to_id[coco_cls_id]
-            
-            # Đổi tọa độ từ dạng [x1, y1, x2, y2] sang [x, y, w, h]
-            final_bboxes.append([float(x1.item()), float(y1.item()), float(x2.item() - x1.item()), float(y2.item() - y1.item())])
-            final_confs.append(float(conf.item()))
-            final_class_ids.append(int(target_id))
+        if len(results) > 0 and len(results[0].boxes) > 0:
+            boxes = results[0].boxes
+            for box in boxes:
+                x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
+                conf = float(box.conf[0].cpu().numpy())
+                raw_cls_id = int(box.cls[0].cpu().numpy())
+                target_cls_id = map_cls(raw_cls_id)
+
+                if 0 <= target_cls_id <= 5:
+                    w = float(x2 - x1)
+                    h = float(y2 - y1)
+                    if w > 0 and h > 0:
+                        final_bboxes.append([float(x1), float(y1), w, h])
+                        final_confs.append(conf)
+                        final_class_ids.append(int(target_cls_id))
 
         if not final_bboxes:
-            return (np.empty((0, 4), dtype=np.float32), 
-                    np.empty((0,), dtype=np.float32), 
-                    np.empty((0,), dtype=np.int32))
+            return (
+                np.empty((0, 4), dtype=np.float32),
+                np.empty((0,), dtype=np.float32),
+                np.empty((0,), dtype=np.int32),
+            )
 
-        return (np.array(final_bboxes, dtype=np.float32), 
-                np.array(final_confs, dtype=np.float32), 
-                np.array(final_class_ids, dtype=np.int32))
+        return (
+            np.array(final_bboxes, dtype=np.float32),
+            np.array(final_confs, dtype=np.float32),
+            np.array(final_class_ids, dtype=np.int32),
+        )

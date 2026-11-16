@@ -27,8 +27,8 @@ int main(int argc, char** argv) {
     std::cout << "[1/4] Khởi tạo Camera Motion Compensation (CMC)..." << std::endl;
     SparseOpticalFlowCMC cmc(100, 0.01, 30.0, 0.35);
 
-    std::cout << "[2/4] Khởi tạo YOLO Detector: " << yolo_path << "..." << std::endl;
-    YoloDetector detector(yolo_path, 0.55f, 0.45f);
+    std::cout << "[2/4] Khởi tạo YOLO Detector: " << yolo_path << " (6 Traffic Classes)..." << std::endl;
+    YoloDetector detector(yolo_path, 0.50f, 0.45f, 6);
 
     std::cout << "[3/4] Khởi tạo Unified ReID Extractor: " << reid_path << "..." << std::endl;
     ReidExtractor reid(reid_path);
