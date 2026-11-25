@@ -14,7 +14,7 @@ namespace ukf_deepsort {
  */
 class YoloDetector {
 public:
-    explicit YoloDetector(const std::string& engine_path, float conf_thresh = 0.50f, float nms_thresh = 0.45f, int num_classes = 6);
+    explicit YoloDetector(const std::string& engine_path, float conf_thresh = 0.50f, float nms_thresh = 0.45f, int num_classes = 6, int input_w = 640, int input_h = 384);
 
     /**
      * @brief Thực hiện phát hiện vật thể trên ảnh gốc BGR.
@@ -32,7 +32,8 @@ private:
     int num_classes_{6};
 
     int input_w_{640};
-    int input_h_{640};
+    int input_h_{384};
+    int num_anchors_{5040};
 
     std::vector<float> input_buffer_;
     std::vector<float> output_buffer_;

@@ -2,8 +2,8 @@
 Kịch bản huấn luyện (Fine-tuning) mô hình YOLO26n trên tập dữ liệu gán nhãn tùy chỉnh (6 lớp).
 
 Hỗ trợ chạy trực tiếp trên Google Colab (GPU T4/A100) hoặc máy cục bộ (CUDA/CPU).
-Sau khi huấn luyện, tự động đánh giá trên tập Validation & Test, và tùy chọn xuất sang
-OpenVINO (FP16/INT8) và ONNX để phục vụ cho pipeline UKF-DeepSORT-KITTI-Benchmark.
+Sau khi huấn luyện, tự động đánh giá trên tập Validation & Test, và xuất sang
+định dạng ONNX (được tối ưu hóa bằng onnxsim) và TensorRT FP16 Engine cho NVIDIA Jetson Nano.
 """
 
 import os
@@ -11,6 +11,20 @@ import sys
 import argparse
 from pathlib import Path
 from ultralytics import YOLO
+
+
+def parse_imgsz(val):
+    """Phân tích kích thước ảnh đầu vào (hỗ trợ số nguyên hoặc tỉ lệ chữ nhật H,W)."""
+    if isinstance(val, (list, tuple)):
+        return [int(x) for x in val]
+    if isinstance(val, int):
+        return val
+    val = str(val).strip()
+    for sep in [",", "x", "X", " "]:
+        if sep in val:
+            parts = [int(x.strip()) for x in val.split(sep) if x.strip()]
+            return parts if len(parts) > 1 else parts[0]
+    return int(val)
 
 
 def parse_args():
@@ -24,14 +38,14 @@ def parse_args():
     parser.add_argument(
         "--weights",
         type=str,
-        default="weights/yolo26n.pt",
-        help="Trọng số khởi tạo (weights/yolo26n.pt hoặc yolo26n.pt)",
+        default="weights/yolo26n_traffic_best.pt",
+        help="Trọng số kế thừa (ưu tiên weights/yolo26n_traffic_best.pt, fallback sang weights/yolo26n.pt)",
     )
     parser.add_argument(
         "--epochs",
         type=int,
-        default=50,
-        help="Số lượng epoch (khuyến nghị 50-100 cho tập 100 ảnh)",
+        default=60,
+        help="Số lượng epoch (khuyến nghị 50-100 cho tập 150 ảnh)",
     )
     parser.add_argument(
         "--batch",
@@ -41,9 +55,15 @@ def parse_args():
     )
     parser.add_argument(
         "--imgsz",
-        type=int,
-        default=640,
-        help="Kích thước ảnh đầu vào (640 cho cân bằng tốc độ/độ chính xác)",
+        type=str,
+        default="384,640",
+        help="Kích thước ảnh đầu vào: '384,640' (chuẩn chữ nhật 16:9 cho 1080p) hoặc '640' (vuông)",
+    )
+    parser.add_argument(
+        "--rect",
+        action="store_true",
+        default=True,
+        help="Bật chế độ huấn luyện hình chữ nhật (Rectangular Training) để tối ưu padding",
     )
     parser.add_argument(
         "--patience",
@@ -76,23 +96,30 @@ def parse_args():
         help="Tên thư mục thực nghiệm",
     )
     parser.add_argument(
-        "--export-openvino",
+        "--export-onnx",
         action="store_true",
         default=True,
-        help="Tự động xuất OpenVINO sau khi huấn luyện hoàn tất",
+        help="Tự động xuất mô hình sang ONNX sau khi huấn luyện hoàn tất",
+    )
+    parser.add_argument(
+        "--export-engine",
+        action="store_true",
+        default=False,
+        help="Tự động xuất mô hình sang TensorRT Engine (yêu cầu GPU NVIDIA / CUDA)",
     )
     return parser.parse_args()
 
 
 def main():
     args = parse_args()
+    imgsz = parse_imgsz(args.imgsz)
     
     print("=" * 70)
     print("🚀 BẮT ĐẦU QUÁ TRÌNH HUẤN LUYỆN YOLO26N (TRAFFIC 6 CLASSES)")
     print("=" * 70)
     print(f"[CẤU HÌNH] Dataset config : {args.data}")
     print(f"[CẤU HÌNH] Pretrained weights : {args.weights}")
-    print(f"[CẤU HÌNH] Epochs : {args.epochs} | Batch: {args.batch} | ImgSz: {args.imgsz}")
+    print(f"[CẤU HÌNH] Epochs : {args.epochs} | Batch: {args.batch} | ImgSz: {imgsz} (Chữ nhật 16:9: {args.rect})")
     print(f"[CẤU HÌNH] Freeze layers: {args.freeze} | Patience: {args.patience}")
     print(f"[CẤU HÌNH] Project output : {args.project}/{args.name}")
     print("=" * 70)
@@ -115,20 +142,23 @@ def main():
     weights_path = Path(args.weights)
     if not weights_path.exists():
         script_dir = Path(__file__).resolve().parent
-        alt_weights = script_dir / args.weights
-        if alt_weights.exists():
-            weights_path = alt_weights
-        elif (script_dir / "weights" / "yolo26n.pt").exists():
-            weights_path = script_dir / "weights" / "yolo26n.pt"
-        elif Path("weights/yolo26n.pt").exists():
-            weights_path = Path("weights/yolo26n.pt")
-        elif Path("yolo26n.pt").exists():
-            weights_path = Path("yolo26n.pt")
+        candidates = [
+            script_dir / args.weights,
+            script_dir / "weights" / "yolo26n_traffic_best.pt",
+            Path("weights/yolo26n_traffic_best.pt"),
+            script_dir / "weights" / "yolo26n.pt",
+            Path("weights/yolo26n.pt"),
+            Path("yolo26n.pt"),
+        ]
+        found = next((c for c in candidates if c.exists()), None)
+        if found is not None:
+            weights_path = found
         else:
             print(f"[CẢNH BÁO] Không tìm thấy '{args.weights}'. Sẽ khởi tạo từ kiến trúc yolo26n.yaml...")
             weights_path = "yolo26n.yaml"
 
-    print(f"[INFO] Tải mô hình từ: {weights_path}")
+    train_imgsz = max(imgsz) if isinstance(imgsz, (list, tuple)) else imgsz
+    print(f"[INFO] Tải trọng số kế thừa từ: {weights_path}")
     model = YOLO(str(weights_path))
 
     # 2. Huấn luyện mô hình
@@ -137,7 +167,8 @@ def main():
         data=str(data_path),
         epochs=args.epochs,
         batch=args.batch,
-        imgsz=args.imgsz,
+        imgsz=train_imgsz,
+        rect=args.rect,
         patience=args.patience,
         freeze=args.freeze if args.freeze > 0 else None,
         device=args.device if args.device else None,
@@ -146,7 +177,7 @@ def main():
         save=True,
         save_period=10,
         exist_ok=True,
-        # Tăng cường dữ liệu phù hợp với tập 100 ảnh để tránh overfitting:
+        # Tăng cường dữ liệu phù hợp với tập 150 ảnh để tránh overfitting:
         mosaic=1.0,
         mixup=0.1,
         flipud=0.0,
@@ -162,17 +193,17 @@ def main():
 
     # 3. Đánh giá trên tập Validation
     print("\n[INFO] Đánh giá trên tập Validation (val)...")
-    val_metrics = model.val(data=str(data_path), split="val")
+    val_metrics = model.val(data=str(data_path), split="val", imgsz=train_imgsz, rect=args.rect)
     print(f"Validation mAP50:    {val_metrics.box.map50:.4f}")
     print(f"Validation mAP50-95: {val_metrics.box.map:.4f}")
 
     # 4. Đánh giá trên tập Test
     print("\n[INFO] Đánh giá trên tập Kiểm thử độc lập (test)...")
-    test_metrics = model.val(data=str(data_path), split="test")
+    test_metrics = model.val(data=str(data_path), split="test", imgsz=train_imgsz, rect=args.rect)
     print(f"Test mAP50:    {test_metrics.box.map50:.4f}")
     print(f"Test mAP50-95: {test_metrics.box.map:.4f}")
 
-    # 5. Xuất OpenVINO & ONNX (nếu được yêu cầu)
+    # 5. Xuất ONNX & TensorRT cho NVIDIA Jetson Nano
     save_dir = Path(train_results.save_dir) if hasattr(train_results, "save_dir") else Path(args.project) / args.name
     best_weights = save_dir / "weights" / "best.pt"
     if not best_weights.exists():
@@ -180,40 +211,38 @@ def main():
         matches = glob.glob("runs/**/weights/best.pt", recursive=True)
         if matches:
             best_weights = Path(matches[-1])
-    if best_weights.exists() and args.export_openvino:
+    if best_weights.exists():
         print("\n" + "=" * 70)
-        print("[INFO] BẮT ĐẦU XUẤT MÔ HÌNH SANG OPENVINO & ONNX TỪ TRỌNG SỐ TỐT NHẤT (best.pt)...")
+        print("[INFO] BẮT ĐẦU XUẤT MÔ HÌNH CHO NVIDIA JETSON NANO TỪ (best.pt)...")
+        print(f"[INFO] Kích thước đầu vào chuẩn chữ nhật: {imgsz}")
         print("=" * 70)
         best_model = YOLO(str(best_weights))
         
-        # Xuất ONNX
-        try:
-            print("[INFO] Xuất định dạng ONNX...")
-            best_model.export(format="onnx", imgsz=args.imgsz)
-            print("[SUCCESS] Xuất ONNX thành công!")
-        except Exception as e:
-            print(f"[WARNING] Xuất ONNX thất bại: {e}")
+        # Xuất ONNX chuẩn hóa
+        if args.export_onnx:
+            try:
+                print(f"[INFO] Xuất định dạng ONNX (imgsz={imgsz}, simplify=True)...")
+                onnx_path = best_model.export(format="onnx", imgsz=imgsz, simplify=True)
+                print(f"[SUCCESS] Xuất ONNX thành công: {onnx_path}")
+                print(f"👉 Để nén sang TensorRT FP16 Engine trên Jetson Nano, chạy lệnh trtexec:")
+                print(f"   /usr/src/tensorrt/bin/trtexec --onnx={onnx_path} --saveEngine=yolo26n_traffic_fp16.engine --fp16\n")
+            except Exception as e:
+                print(f"[WARNING] Xuất ONNX thất bại: {e}")
 
-        # Xuất OpenVINO FP16
-        try:
-            print("[INFO] Xuất định dạng OpenVINO FP16...")
-            best_model.export(format="openvino", imgsz=args.imgsz, half=True)
-            print("[SUCCESS] Xuất OpenVINO FP16 thành công!")
-        except Exception as e:
-            print(f"[WARNING] Xuất OpenVINO FP16 thất bại: {e}")
-
-        # Xuất OpenVINO INT8 (với Calibration data)
-        try:
-            print("[INFO] Xuất định dạng OpenVINO INT8 (Post-Training Quantization)...")
-            best_model.export(
-                format="openvino",
-                int8=True,
-                data=str(data_path),
-                imgsz=args.imgsz,
-            )
-            print("[SUCCESS] Xuất OpenVINO INT8 thành công!")
-        except Exception as e:
-            print(f"[WARNING] Xuất OpenVINO INT8 thất bại: {e}")
+        # Xuất TensorRT Engine trực tiếp (nếu có GPU)
+        if args.export_engine:
+            try:
+                print(f"[INFO] Xuất định dạng TensorRT Engine (imgsz={imgsz}, FP16)...")
+                engine_path = best_model.export(
+                    format="engine",
+                    imgsz=imgsz,
+                    half=True,
+                    device=args.device if args.device else 0,
+                    simplify=True,
+                )
+                print(f"[SUCCESS] Xuất TensorRT Engine thành công: {engine_path}")
+            except Exception as e:
+                print(f"[WARNING] Xuất TensorRT Engine thất bại (cần NVIDIA GPU / CUDA): {e}")
 
     print("\n" + "=" * 70)
     print(f"🎉 TOÀN BỘ QUÁ TRÌNH ĐÃ HOÀN TẤT! Trọng số tốt nhất tại: {best_weights}")

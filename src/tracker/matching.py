@@ -160,7 +160,7 @@ def linear_assignment(cost_matrix, tracks, detections, max_distance=0.2):
 
     return matches, unmatched_tracks, unmatched_detections
 
-def compute_mahalanobis_distance(tracks, detections):
+def compute_mahalanobis_distance(tracks, detections, img_w=1920.0, img_h=1080.0):
     """
     Tính ma trận bình phương khoảng cách Mahalanobis để thực hiện Dynamic Gating.
     
@@ -171,6 +171,8 @@ def compute_mahalanobis_distance(tracks, detections):
         tracks (list): Danh sách các đối tượng Track hiện tại. Yêu cầu mỗi đối tượng 
             có thuộc tính `ukf` (với `mean` và `covariance`) và hàm `_tlwh_to_xyah()`.
         detections (list): Danh sách các đối tượng Detection. Yêu cầu có thuộc tính `bbox`.
+        img_w (float, optional): Chiều rộng khung hình ảnh (mặc định 1920.0).
+        img_h (float, optional): Chiều cao khung hình ảnh (mặc định 1080.0).
 
     Returns:
         numpy.ndarray: Ma trận khoảng cách Mahalanobis bình phương (D^2) kích thước (M, N).
@@ -187,11 +189,11 @@ def compute_mahalanobis_distance(tracks, detections):
         cx, cy, a, h = raw_state[0], raw_state[1], raw_state[2], raw_state[3]
         w = a * h
         
-        # 2. Chiếu State thô sang Measurement Space (Giả lập lại h(x))
+        # 2. Chiếu State thô sang Measurement Space (Giả lập lại h(x) theo kích thước ảnh)
         xmin = max(0.0, cx - w / 2.0)
-        xmax = min(1242.0, cx + w / 2.0)
+        xmax = min(float(img_w), cx + w / 2.0)
         ymin = max(0.0, cy - h / 2.0)
-        ymax = min(375.0, cy + h / 2.0)
+        ymax = min(float(img_h), cy + h / 2.0)
         
         # Nếu xe văng hẳn ra ngoài, đánh chi phí cực đại để tránh chia 0
         if xmin >= xmax or ymin >= ymax:

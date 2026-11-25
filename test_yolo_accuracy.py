@@ -3,7 +3,7 @@ Kịch bản đánh giá và so sánh độ chính xác chuẩn YOLO giữa:
 1. Mô hình YOLO26n Gốc (Pretrained COCO, chưa huấn luyện trên tập dữ liệu Traffic).
 2. Mô hình YOLO26n Đã Huấn luyện (Fine-tuned trên tập dữ liệu Traffic 6 lớp).
 
-Chấm điểm trên 10 ảnh kiểm thử độc lập (test set) theo chuẩn mAP@0.5, mAP@0.5:0.95,
+Chấm điểm trên 15 ảnh kiểm thử độc lập (test set) theo chuẩn mAP@0.5, mAP@0.5:0.95,
 Precision, Recall và phân tích chi tiết theo từng lớp đối tượng.
 """
 
@@ -16,6 +16,19 @@ from pathlib import Path
 import cv2
 import numpy as np
 from ultralytics import YOLO
+
+
+def parse_imgsz(val):
+    if isinstance(val, (list, tuple)):
+        return [int(x) for x in val]
+    if isinstance(val, int):
+        return val
+    val = str(val).strip()
+    for sep in [",", "x", "X", " "]:
+        if sep in val:
+            parts = [int(x.strip()) for x in val.split(sep) if x.strip()]
+            return parts if len(parts) > 1 else parts[0]
+    return int(val)
 
 
 def parse_args():
@@ -45,13 +58,13 @@ def parse_args():
         type=str,
         default="test",
         choices=["test", "val", "train"],
-        help="Tập dữ liệu để chấm điểm (mặc định: 'test' gồm 10 ảnh)",
+        help="Tập dữ liệu để chấm điểm (mặc định: 'test' gồm 15 ảnh)",
     )
     parser.add_argument(
         "--imgsz",
-        type=int,
-        default=640,
-        help="Kích thước ảnh đầu vào (mặc định 640)",
+        type=str,
+        default="384,640",
+        help="Kích thước ảnh đầu vào: '384,640' (chuẩn chữ nhật 16:9) hoặc '640'",
     )
     parser.add_argument(
         "--conf",
@@ -288,12 +301,15 @@ def main():
     if isinstance(dataset_names, list):
         dataset_names = {i: name for i, name in enumerate(dataset_names)}
 
+    imgsz = parse_imgsz(args.imgsz)
+
     print("=" * 90)
     print("🚀 CHƯƠNG TRÌNH SO SÁNH ĐỘ CHÍNH XÁC MÔ HÌNH YOLO26N (TRAFFIC DATASET)")
     print("=" * 90)
     print(f"[CẤU HÌNH] Dataset config: {args.data}")
-    print(f"[CẤU HÌNH] Split đánh giá: {args.split} (10 ảnh)")
+    print(f"[CẤU HÌNH] Split đánh giá: {args.split}")
     print(f"[CẤU HÌNH] Model gốc      : {args.weights_base}")
+    print(f"[CẤU HÌNH] Kích thước ảnh: {imgsz}")
 
     # 1. Kiểm tra mô hình gốc
     base_weights_path = Path(args.weights_base)
@@ -306,7 +322,7 @@ def main():
         base_weights_path,
         args.data,
         split=args.split,
-        imgsz=args.imgsz,
+        imgsz=imgsz,
         device=args.device,
         dataset_names=dataset_names,
         conf=args.conf,
@@ -323,7 +339,7 @@ def main():
             trained_weights_path,
             args.data,
             split=args.split,
-            imgsz=args.imgsz,
+            imgsz=imgsz,
             device=args.device,
             dataset_names=dataset_names,
             conf=args.conf,
@@ -369,7 +385,7 @@ def main():
                 test_images,
                 output_dir,
                 conf=args.conf,
-                imgsz=args.imgsz,
+                imgsz=imgsz,
             )
 
 

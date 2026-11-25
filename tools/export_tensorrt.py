@@ -13,6 +13,19 @@ import argparse
 from pathlib import Path
 
 
+def parse_imgsz(val):
+    if isinstance(val, (list, tuple)):
+        return [int(x) for x in val]
+    if isinstance(val, int):
+        return val
+    val = str(val).strip()
+    for sep in [",", "x", "X", " "]:
+        if sep in val:
+            parts = [int(x.strip()) for x in val.split(sep) if x.strip()]
+            return parts if len(parts) > 1 else parts[0]
+    return int(val)
+
+
 def parse_args():
     parser = argparse.ArgumentParser(
         description="Xuất mô hình sang TensorRT FP16 cho NVIDIA Jetson Nano"
@@ -25,9 +38,9 @@ def parse_args():
     )
     parser.add_argument(
         "--imgsz",
-        type=int,
-        default=640,
-        help="Kích thước ảnh đầu vào (640 cho YOLO)",
+        type=str,
+        default="384,640",
+        help="Kích thước ảnh đầu vào: '384,640' (chuẩn chữ nhật 16:9 cho 1080p) hoặc '640'",
     )
     parser.add_argument(
         "--half",
@@ -120,7 +133,8 @@ def guide_reid_tensorrt(reid_onnx_path):
 
 def main():
     args = parse_args()
-    export_yolo_tensorrt(args.weights, imgsz=args.imgsz, half=args.half, device=args.device)
+    imgsz = parse_imgsz(args.imgsz)
+    export_yolo_tensorrt(args.weights, imgsz=imgsz, half=args.half, device=args.device)
     guide_reid_tensorrt(args.reid_onnx)
 
 

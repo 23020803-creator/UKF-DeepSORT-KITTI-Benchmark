@@ -20,15 +20,19 @@ class TrackUKF:
     - gamma: Tỷ lệ giãn nở khung hình (Perspective expansion rate).
     """
 
-    def __init__(self, fps=10):
+    def __init__(self, fps=10, img_size=(1920.0, 1080.0)):
         """
         Khởi tạo bộ lọc UKF.
 
         Args:
             fps (int, optional): Số khung hình trên giây để tính bước nhảy thời gian dt.
                                  Mặc định là 10.
+            img_size (tuple, optional): Kích thước khung hình ảnh (width, height).
+                                        Mặc định là (1920.0, 1080.0) theo chuẩn ảnh đầu vào (data8).
         """
         self.dt = 1.0 / float(fps)
+        self.img_w = float(img_size[0])
+        self.img_h = float(img_size[1])
         
         def transition_function(x, dt):
             """
@@ -96,10 +100,10 @@ class TrackUKF:
             ymin = cy - h / 2.0
             ymax = cy + h / 2.0
             
-            # 3. Mô phỏng góc nhìn vật lý của Camera (Dataset KITTI: 1242x375)
+            # 3. Mô phỏng góc nhìn vật lý của Camera (Ảnh đầu vào: 1920x1080 cho data8)
             # YOLO sẽ không bao giờ nhìn thấy phần tọa độ âm hoặc vượt quá độ phân giải
-            IMG_WIDTH = 1242.0
-            IMG_HEIGHT = 375.0
+            IMG_WIDTH = self.img_w
+            IMG_HEIGHT = self.img_h
             
             xmin_obs = max(0.0, xmin)
             xmax_obs = min(IMG_WIDTH, xmax)

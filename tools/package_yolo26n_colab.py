@@ -13,6 +13,7 @@ print(f"[INFO] Bắt đầu đóng gói tài nguyên vào {PACKAGE_ZIP}...")
 
 # Các file và thư mục cần đưa vào ZIP
 dataset_dir = ROOT / "datasets" / "yolo26n_dataset"
+weights_best_pt = ROOT / "weights" / "yolo26n_traffic_best.pt"
 weights_pt = ROOT / "weights" / "yolo26n.pt"
 weights_yaml = ROOT / "weights" / "yolo26n.yaml"
 script_train = ROOT / "train_yolo26n.py"
@@ -30,7 +31,9 @@ with zipfile.ZipFile(PACKAGE_ZIP, "w", zipfile.ZIP_DEFLATED) as zipf:
             arcname = file_path.relative_to(ROOT / "datasets")
             zipf.write(file_path, arcname)
 
-    # 2. Thêm weights
+    # 2. Thêm weights (bao gồm bản fine-tuned để kế thừa và bản gốc làm fallback)
+    if weights_best_pt.exists():
+        zipf.write(weights_best_pt, Path("weights") / weights_best_pt.name)
     if weights_pt.exists():
         zipf.write(weights_pt, Path("weights") / weights_pt.name)
     if weights_yaml.exists():

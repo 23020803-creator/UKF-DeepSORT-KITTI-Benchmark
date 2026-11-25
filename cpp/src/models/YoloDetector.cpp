@@ -4,13 +4,13 @@
 
 namespace ukf_deepsort {
 
-YoloDetector::YoloDetector(const std::string& engine_path, float conf_thresh, float nms_thresh, int num_classes)
-    : conf_thresh_(conf_thresh), nms_thresh_(nms_thresh), num_classes_(num_classes) {
+YoloDetector::YoloDetector(const std::string& engine_path, float conf_thresh, float nms_thresh, int num_classes, int input_w, int input_h)
+    : conf_thresh_(conf_thresh), nms_thresh_(nms_thresh), num_classes_(num_classes), input_w_(input_w), input_h_(input_h) {
     engine_ = std::make_unique<TrtEngine>(engine_path);
     input_buffer_.resize(1 * 3 * input_h_ * input_w_, 0.0f);
-    // YOLO output: [1, 4 + num_classes, 8400]
+    num_anchors_ = (input_h_ / 8) * (input_w_ / 8) + (input_h_ / 16) * (input_w_ / 16) + (input_h_ / 32) * (input_w_ / 32);
     int num_channels = 4 + num_classes_;
-    output_buffer_.resize(1 * num_channels * 8400, 0.0f);
+    output_buffer_.resize(1 * num_channels * num_anchors_, 0.0f);
 }
 
 void YoloDetector::preprocess(const cv::Mat& image, float& scale, int& pad_x, int& pad_y) {
@@ -89,17 +89,17 @@ void YoloDetector::nms(std::vector<Detection>& dets, float nms_thresh) {
 std::vector<Detection> YoloDetector::postprocess(const cv::Mat& image, float scale, int pad_x, int pad_y) {
     std::vector<Detection> raw_dets;
 
-    // Output shape: [1, 4 + num_classes, 8400]
+    // Output shape: [1, 4 + num_classes, num_anchors]
     const int num_channels = 4 + num_classes_;
-    constexpr int NUM_ANCHORS = 8400;
+    const int num_anchors = num_anchors_;
 
-    for (int i = 0; i < NUM_ANCHORS; ++i) {
+    for (int i = 0; i < num_anchors; ++i) {
         // Tìm class có confidence lớn nhất
         float max_score = 0.0f;
         int max_cls = -1;
 
         for (int c = 0; c < num_classes_; ++c) {
-            float score = output_buffer_[(4 + c) * NUM_ANCHORS + i];
+            float score = output_buffer_[(4 + c) * num_anchors + i];
             if (score > max_score) {
                 max_score = score;
                 max_cls = c;
@@ -108,10 +108,10 @@ std::vector<Detection> YoloDetector::postprocess(const cv::Mat& image, float sca
 
         // Lọc theo ngưỡng confidence
         if (max_cls >= 0 && max_score >= conf_thresh_) {
-            float cx = output_buffer_[0 * NUM_ANCHORS + i];
-            float cy = output_buffer_[1 * NUM_ANCHORS + i];
-            float w  = output_buffer_[2 * NUM_ANCHORS + i];
-            float h  = output_buffer_[3 * NUM_ANCHORS + i];
+            float cx = output_buffer_[0 * num_anchors + i];
+            float cy = output_buffer_[1 * num_anchors + i];
+            float w  = output_buffer_[2 * num_anchors + i];
+            float h  = output_buffer_[3 * num_anchors + i];
 
             // Chuyển ngược từ padded sang ảnh gốc
             float x1 = (cx - w * 0.5f - pad_x) / scale;

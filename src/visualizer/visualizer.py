@@ -90,11 +90,38 @@ class Visualizer:
         drawn_image = image.copy()
         h_img, w_img = drawn_image.shape[:2]
 
-        cv2.putText(drawn_image, f"Frame: {frame_idx:04d}", (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2, cv2.LINE_AA)
-        cv2.putText(drawn_image, f"Active Tracks: {len(active_tracks)}", (20, 80), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2, cv2.LINE_AA)
+        # Tách các track: có detection ở frame hiện tại (visible) và track đang mất dấu dự đoán bằng UKF (lost/coasting)
+        visible_tracks = [t for t in active_tracks if t[8] > 0 and t[9] > 0]
+        lost_tracks = [t for t in active_tracks if t[8] == 0 or t[9] == 0]
 
-        for track in active_tracks:
-            # Giải nén đúng 10 phần tử từ tracker.py
+        cv2.putText(drawn_image, f"Frame: {frame_idx:04d}", (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2, cv2.LINE_AA)
+        cv2.putText(drawn_image, f"Active Tracks: {len(visible_tracks)} (Lost UKF: {len(lost_tracks)})", (20, 80), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2, cv2.LINE_AA)
+
+        # 1. Vẽ các track đang mất dấu (Dự đoán bởi bộ lọc UKF)
+        for track in lost_tracks:
+            track_id, class_id, ukf_x, ukf_y, ukf_w, ukf_h, _, _, _, _ = track
+            track_id = int(track_id)
+            class_id = int(class_id)
+            class_name = self.class_names.get(class_id, "Unknown")
+            
+            ux1, uy1 = int(round(ukf_x)), int(round(ukf_y))
+            ux2, uy2 = int(round(ukf_x + ukf_w)), int(round(ukf_y + ukf_h))
+            ucx, ucy = int(round(ukf_x + ukf_w / 2.0)), int(round(ukf_y + ukf_h / 2.0))
+            
+            # Màu cam cảnh báo cho track đang mất dấu
+            lost_color = (0, 140, 255)
+            cv2.rectangle(drawn_image, (ux1, uy1), (ux2, uy2), lost_color, 2)
+            cv2.circle(drawn_image, (ucx, ucy), radius=4, color=(0, 0, 255), thickness=-1)
+            
+            label = f"[LOST UKF] {class_name} | ID: {track_id}"
+            (text_width, text_height), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.55, 1)
+            label_top = max(uy1, text_height + 10)
+            cv2.rectangle(drawn_image, (ux1, label_top - text_height - 8), (ux1 + text_width + 6, label_top), lost_color, -1)
+            cv2.putText(drawn_image, label, (ux1 + 3, label_top - 4), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 1, cv2.LINE_AA)
+
+        # 2. Vẽ các track có detection thực tế
+        for track in visible_tracks:
+            # Giải nén thông tin từ tracker.py
             track_id, class_id, ukf_x, ukf_y, ukf_w, ukf_h, yolo_x, yolo_y, yolo_w, yolo_h = track
 
             track_id = int(track_id)
@@ -103,32 +130,22 @@ class Visualizer:
             class_name = self.class_names.get(class_id, "Unknown")
 
             # ==========================================
-            # 1. VẼ HỘP YOLO (Chỉ vẽ nếu w và h > 0)
+            # VẼ HỘP BAO CHÍNH THỨC CỦA YOLO (Có Class & ID)
             # ==========================================
-            if yolo_w > 0 and yolo_h > 0:
-                yx1, yy1 = int(yolo_x), int(yolo_y)
-                yx2, yy2 = int(yolo_x + yolo_w), int(yolo_y + yolo_h)
-                
-                cv2.rectangle(drawn_image, (yx1, yy1), (yx2, yy2), (255, 255, 0), 1)
-                cv2.putText(drawn_image, "YOLO", (yx1, yy1 - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 0), 1, cv2.LINE_AA)
+            yx1, yy1 = int(round(yolo_x)), int(round(yolo_y))
+            yx2, yy2 = int(round(yolo_x + yolo_w)), int(round(yolo_y + yolo_h))
 
-            # ==========================================
-            # 2. VẼ HỘP UKF (Màu sắc đậm, có ID và Tâm đỏ)
-            # ==========================================
-            ux1, uy1 = int(ukf_x), int(ukf_y)
-            ux2, uy2 = int(ukf_x + ukf_w), int(ukf_y + ukf_h)
-            cx, cy = int(ukf_x + ukf_w / 2.0), int(ukf_y + ukf_h / 2.0)
+            # 1. Vẽ hộp bao YOLO theo màu của Track ID (độ dày viền 2px)
+            cv2.rectangle(drawn_image, (yx1, yy1), (yx2, yy2), color, 2)
 
-            # Vẽ hộp dự đoán UKF
-            cv2.rectangle(drawn_image, (ux1, uy1), (ux2, uy2), color, 2)
-            # Vẽ tâm UKF
-            cv2.circle(drawn_image, (cx, cy), radius=4, color=(0, 0, 255), thickness=-1)
-
-            # Vẽ Label ID cho UKF
+            # 2. Vẽ Banner nhãn hiển thị: [Class] | ID: [ID]
             label = f"{class_name} | ID: {track_id}"
             (text_width, text_height), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 1)
-            cv2.rectangle(drawn_image, (ux1, uy1 - text_height - 10), (ux1 + text_width, uy1), color, -1)
-            cv2.putText(drawn_image, label, (ux1, uy1 - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1, cv2.LINE_AA)
+
+            # Chống tràn banner lên mép trên ảnh
+            label_top = max(yy1, text_height + 10)
+            cv2.rectangle(drawn_image, (yx1, label_top - text_height - 10), (yx1 + text_width, label_top), color, -1)
+            cv2.putText(drawn_image, label, (yx1, label_top - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1, cv2.LINE_AA)
         
         if self.writer is None:
             fourcc = cv2.VideoWriter_fourcc(*'mp4v')

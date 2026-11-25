@@ -50,17 +50,19 @@ class YOLODetector:
         7: 5,  # truck -> Truck
     }
 
-    def __init__(self, model_path="weights/yolo26n_traffic_best.pt", conf_thresh=0.5):
+    def __init__(self, model_path="weights/yolo26n_traffic_best.pt", conf_thresh=0.5, nms_thresh=0.7):
         """
         Khởi tạo YOLODetector hỗ trợ đầy đủ 6 lớp đối tượng giao thông.
 
         Args:
             model_path (str): Đường dẫn tới file trọng số .pt hoặc mô hình engine.
-            conf_thresh (float): Ngưỡng tự tin (confidence threshold) cho NMS.
+            conf_thresh (float): Ngưỡng tự tin (confidence threshold) lọc Bounding Box.
+            nms_thresh (float): Ngưỡng Non-Maximum Suppression (NMS IoU). Mặc định 0.7 (70%).
         """
         self.conf_thresh = conf_thresh
+        self.nms_thresh = nms_thresh
         self.img_width = 640
-        self.img_height = 640
+        self.img_height = 384
 
         # Tự động chuyển fallback nếu model_path chưa tồn tại
         if not os.path.exists(model_path):
@@ -117,9 +119,9 @@ class YOLODetector:
         results = self.model(
             image,
             conf=self.conf_thresh,
-            iou=0.30,
+            iou=self.nms_thresh,
             classes=query_classes,
-            imgsz=self.img_width,
+            imgsz=[self.img_height, self.img_width],
             verbose=False,
         )
 

@@ -26,8 +26,8 @@ notebook = {
                 "# 🚀 HUẤN LUYỆN YOLO26n TRÊN GOOGLE COLAB\n",
                 "### Dành cho bộ dữ liệu Traffic Tracking (6 Classes: person, bicycle, car, motorbike, bus, truck)\n",
                 "\n",
-                "* **Dataset**: 100 ảnh đã gán nhãn & kiểm duyệt từ CVAT (chia tỉ lệ 7:2:1 -> 70 train, 20 val, 10 test).\n",
-                "* **Mục tiêu**: Fine-tuning mô hình YOLO26n (Ultralytics), đánh giá mAP, trực quan hóa kết quả và xuất sang OpenVINO INT8 / FP16 & ONNX để tích hợp vào hệ thống UKF-DeepSORT.\n"
+                "* **Dataset**: 150 ảnh đã gán nhãn & kiểm duyệt lại từ CVAT (chia tỉ lệ 7:2:1 -> 105 train, 30 val, 15 test, tổng 1.470 bounding boxes đầy đủ 6 lớp).\n",
+                "* **Mục tiêu**: Fine-tuning mô hình YOLO26n (Ultralytics), đánh giá mAP, trực quan hóa kết quả và xuất sang ONNX & NVIDIA TensorRT (FP16) Engine để sẵn sàng triển khai trên NVIDIA Jetson Nano.\n"
             ]
         },
         {
@@ -49,7 +49,7 @@ notebook = {
             "metadata": {},
             "source": [
                 "## 2. Cài đặt các thư viện cần thiết\n",
-                "Cài đặt `ultralytics` cho YOLO, `openvino` để lượng tử hóa và xuất mô hình tối ưu Intel Edge/CPU, và `onnx`.\n"
+                "Cài đặt `ultralytics` cho YOLO, `onnx` và `onnxsim` để tối ưu hóa đồ thị nơ-ron trước khi nạp vào TensorRT trên Jetson Nano.\n"
             ]
         },
         {
@@ -58,7 +58,7 @@ notebook = {
             "execution_count": None,
             "outputs": [],
             "source": [
-                "!pip install -q \"ultralytics>=8.3.0\" openvino nncf onnx\n"
+                "!pip install -q \"ultralytics>=8.3.0\" onnx onnxsim onnxruntime\n"
             ]
         },
         {
@@ -87,8 +87,8 @@ notebook = {
                 "if os.path.exists(zip_path):\n",
                 "    size_mb = os.path.getsize(zip_path) / (1024 * 1024)\n",
                 "    print(f\"Tìm thấy {zip_path} (Dung lượng: {size_mb:.2f} MB)\")\n",
-                "    if size_mb < 60.0:\n",
-                "        print(f\"⚠️ CẢNH BÁO: File mới tải lên được {size_mb:.2f} MB / 62.8 MB (đang upload dở dang).\")\n",
+                "    if size_mb < 90.0:\n",
+                "        print(f\"⚠️ CẢNH BÁO: File mới tải lên được {size_mb:.2f} MB / ~95 MB (đang upload dở dang).\")\n",
                 "        print(\"👉 Hãy nhìn vào vòng tròn tiến trình bên cạnh file ở thanh bên trái (Files).\")\n",
                 "        print(\"👉 Vui lòng đợi vòng tròn xoay hết 100% rồi ấn chạy lại ô này!\")\n",
                 "    else:\n",
@@ -119,7 +119,7 @@ notebook = {
             "metadata": {},
             "source": [
                 "## 4. Kiểm tra Dữ liệu & Trực quan hóa Nhãn Mẫu\n",
-                "Kiểm tra số lượng ảnh trong từng tập `train` (70), `val` (20), `test` (10) và hiển thị bounding box ảnh mẫu.\n"
+                "Kiểm tra số lượng ảnh trong từng tập `train` (105), `val` (30), `test` (15) và hiển thị bounding box ảnh mẫu.\n"
             ]
         },
         {
@@ -179,12 +179,12 @@ notebook = {
             "cell_type": "markdown",
             "metadata": {},
             "source": [
-                "## 5. Khởi tạo và Huấn luyện YOLO26n\n",
-                "* **Trọng số khởi tạo**: `weights/yolo26n.pt` hoặc `yolo26n.pt`\n",
-                "* **Siêu tham số khuyến nghị cho 100 ảnh**:\n",
+                "## 5. Khởi tạo (Kế thừa trọng số đã fine-tune) và Huấn luyện YOLO26n\n",
+                "* **Trọng số kế thừa**: Ưu tiên `weights/yolo26n_traffic_best.pt` (kế thừa tri thức 6 lớp giao thông đã học), fallback sang `weights/yolo26n.pt` nếu chưa có.\n",
+                "* **Siêu tham số khuyến nghị cho 150 ảnh**:\n",
                 "  - `epochs=60` hoặc `100` (được bảo vệ bởi `patience=20` Early Stopping tránh lãng phí thời gian)\n",
                 "  - `batch=16`\n",
-                "  - `imgsz=640`\n",
+                "  - `imgsz=640` kết hợp `rect=True`: Tự động co theo khung hình chữ nhật 16:9 (`384x640`) khớp hoàn hảo với video Full HD 1920x1080, loại bỏ ~40% vùng padding thừa và tăng tốc độ xử lý trên Jetson Nano.\n",
                 "  - Data Augmentation: Mosaic, Mixup, Flip, HSV giúp mô hình học khái quát tốt hơn trên lượng mẫu nhỏ, chống overfitting.\n"
             ]
         },
@@ -197,17 +197,23 @@ notebook = {
                 "from ultralytics import YOLO\n",
                 "import os\n",
                 "\n",
-                "# Khởi tạo mô hình từ trọng số pretrained\n",
-                "weights_file = \"weights/yolo26n.pt\" if os.path.exists(\"weights/yolo26n.pt\") else \"yolo26n.pt\"\n",
-                "print(f\"Đang tải mô hình từ: {weights_file}\")\n",
+                "# Ưu tiên kế thừa trọng số traffic đã fine-tune, fallback sang yolo26n.pt nếu chưa có\n",
+                "if os.path.exists(\"weights/yolo26n_traffic_best.pt\"):\n",
+                "    weights_file = \"weights/yolo26n_traffic_best.pt\"\n",
+                "elif os.path.exists(\"weights/yolo26n.pt\"):\n",
+                "    weights_file = \"weights/yolo26n.pt\"\n",
+                "else:\n",
+                "    weights_file = \"yolo26n.pt\"\n",
+                "print(f\"Đang tải trọng số kế thừa từ: {weights_file}\")\n",
                 "model = YOLO(weights_file)\n",
                 "\n",
-                "# Tiến hành huấn luyện (lưu kết quả trực tiếp)\n",
+                "# Tiến hành huấn luyện với chế độ chữ nhật 16:9 (imgsz=640, rect=True -> 384x640)\n",
                 "results = model.train(\n",
                 "    data=\"yolo26n_dataset/data.yaml\",\n",
                 "    epochs=60,\n",
                 "    batch=16,\n",
                 "    imgsz=640,\n",
+                "    rect=True,\n",
                 "    patience=20,\n",
                 "    save=True,\n",
                 "    save_period=10,\n",
@@ -244,13 +250,13 @@ notebook = {
                 "\n",
                 "# 1. Đánh giá tập Validation\n",
                 "print(\"--- KẾT QUẢ ĐÁNH GIÁ TẬP VALIDATION ---\")\n",
-                "val_metrics = model.val(data=\"yolo26n_dataset/data.yaml\", split=\"val\")\n",
+                "val_metrics = model.val(data=\"yolo26n_dataset/data.yaml\", split=\"val\", imgsz=640, rect=True)\n",
                 "print(f\"Validation mAP50:    {val_metrics.box.map50:.4f}\")\n",
                 "print(f\"Validation mAP50-95: {val_metrics.box.map:.4f}\")\n",
                 "\n",
                 "# 2. Đánh giá tập Test độc lập\n",
                 "print(\"\\n--- KẾT QUẢ ĐÁNH GIÁ TẬP TEST ĐỘC LẬP ---\")\n",
-                "test_metrics = model.val(data=\"yolo26n_dataset/data.yaml\", split=\"test\")\n",
+                "test_metrics = model.val(data=\"yolo26n_dataset/data.yaml\", split=\"test\", imgsz=640, rect=True)\n",
                 "print(f\"Test mAP50:    {test_metrics.box.map50:.4f}\")\n",
                 "print(f\"Test mAP50-95: {test_metrics.box.map:.4f}\")\n",
                 "\n",
@@ -301,7 +307,7 @@ notebook = {
                 "    test_images = sorted(glob.glob(\"yolo26n_dataset/images/test/*.jpg\"))[:4]\n",
                 "    plt.figure(figsize=(16, 10))\n",
                 "    for i, img_p in enumerate(test_images):\n",
-                "        res = best_model.predict(img_p, conf=0.25, imgsz=640)[0]\n",
+                "        res = best_model.predict(img_p, conf=0.25, imgsz=[384, 640])[0]\n",
                 "        plotted = res.plot()\n",
                 "        plt.subplot(2, 2, i + 1)\n",
                 "        plt.imshow(cv2.cvtColor(plotted, cv2.COLOR_BGR2RGB))\n",
@@ -315,11 +321,11 @@ notebook = {
             "cell_type": "markdown",
             "metadata": {},
             "source": [
-                "## 8. Xuất Mô hình sang OpenVINO & ONNX\n",
+                "## 8. Xuất Mô hình sang ONNX & NVIDIA TensorRT (Cho Jetson Nano)\n",
                 "Xuất mô hình đã fine-tune sang:\n",
-                "1. **ONNX**\n",
-                "2. **OpenVINO FP16**\n",
-                "3. **OpenVINO INT8 (Post-Training Quantization)**: Tối ưu hoá FPS cực mạnh trên Intel CPU, phù hợp tiêu chuẩn của repo benchmark.\n"
+                "1. **ONNX (đã rút gọn với onnxsim)**: Định dạng trung gian chuẩn quốc tế để nạp vào TensorRT trên Jetson Nano.\n",
+                "2. **TensorRT FP16 Engine (.engine)**: Tự động biên dịch nếu Colab có GPU NVIDIA.\n",
+                "3. Kèm theo lệnh `trtexec` để build trực tiếp trên Jetson Nano.\n"
             ]
         },
         {
@@ -329,25 +335,28 @@ notebook = {
             "outputs": [],
             "source": [
                 "from pathlib import Path\n",
+                "import torch\n",
                 "from ultralytics import YOLO\n",
                 "\n",
                 "found_weights = [str(p) for p in Path('runs').rglob('best.pt')]\n",
                 "if found_weights:\n",
                 "    best_model = YOLO(found_weights[-1])\n",
-                "    print(\"1. Xuất mô hình ONNX...\")\n",
-                "    best_model.export(format=\"onnx\", imgsz=640)\n",
+                "    print(\"1. Xuất mô hình ONNX chuẩn chữ nhật 16:9 (384x640, simplify=True)...\")\n",
+                "    onnx_path = best_model.export(format=\"onnx\", imgsz=[384, 640], simplify=True)\n",
+                "    print(f\"✅ Đã tạo file ONNX: {onnx_path}\")\n",
                 "\n",
-                "    print(\"2. Xuất mô hình OpenVINO FP16...\")\n",
-                "    best_model.export(format=\"openvino\", imgsz=640, half=True)\n",
+                "    if torch.cuda.is_available():\n",
+                "        try:\n",
+                "            print(\"\\n2. Xuất định dạng TensorRT FP16 Engine trên Colab GPU...\")\n",
+                "            engine_path = best_model.export(format=\"engine\", imgsz=[384, 640], half=True, device=0, simplify=True)\n",
+                "            print(f\"✅ Đã tạo TensorRT Engine: {engine_path}\")\n",
+                "        except Exception as e:\n",
+                "            print(f\"⚠️ Không xuất được Engine trực tiếp trên Colab (có thể do thiếu trt package): {e}\")\n",
                 "\n",
-                "    print(\"3. Xuất mô hình OpenVINO INT8 PTQ...\")\n",
-                "    best_model.export(\n",
-                "        format=\"openvino\",\n",
-                "        int8=True,\n",
-                "        data=\"yolo26n_dataset/data.yaml\",\n",
-                "        imgsz=640\n",
-                "    )\n",
-                "    print(\"✅ Xuất toàn bộ định dạng thành công!\")\n",
+                "    print(\"\\n\" + \"=\" * 70)\n",
+                "    print(\"👉 Lệnh biên dịch TensorRT FP16 tối ưu nhất trực tiếp trên NVIDIA Jetson Nano:\")\n",
+                "    print(f\"   /usr/src/tensorrt/bin/trtexec --onnx={Path(onnx_path).name} --saveEngine=yolo26n_traffic_fp16.engine --fp16\")\n",
+                "    print(\"=\" * 70)\n",
                 "else:\n",
                 "    print(\"⚠️ Không tìm thấy file best.pt để xuất mô hình. Hãy chạy Ô số 5 trước!\")\n"
             ]
@@ -357,7 +366,7 @@ notebook = {
             "metadata": {},
             "source": [
                 "## 9. Đóng gói Kết quả & Tải về Máy tính\n",
-                "Nén thư mục `best.pt` cùng các mô hình OpenVINO / ONNX thành file ZIP để tải về máy hoặc lưu vào Google Drive.\n"
+                "Nén file trọng số `yolo26n_traffic_best.pt`, file `yolo26n_traffic_best.onnx` và file `.engine` thành ZIP để tải về máy.\n"
             ]
         },
         {
@@ -385,23 +394,17 @@ notebook = {
                 "else:\n",
                 "    print(\"⚠️ Không tìm thấy file best.pt trong runs/\")\n",
                 "\n",
-                "# 2. Copy OpenVINO models\n",
-                "for item in Path(\"runs\").rglob(\"*openvino*\"):\n",
-                "    if item.name in [\"weights\", \"train\"]:\n",
-                "        continue\n",
-                "    dest = os.path.join(output_dir, item.name)\n",
-                "    if item.is_dir():\n",
-                "        if os.path.exists(dest): shutil.rmtree(dest)\n",
-                "        shutil.copytree(str(item), dest)\n",
-                "        print(f\"✅ Đã copy thư mục OpenVINO: {item.name}\")\n",
-                "    else:\n",
-                "        shutil.copy(str(item), dest)\n",
-                "\n",
-                "# 3. Copy ONNX models\n",
+                "# 2. Copy ONNX models\n",
                 "for item in Path(\"runs\").rglob(\"*.onnx\"):\n",
-                "    dest = os.path.join(output_dir, item.name)\n",
+                "    dest = os.path.join(output_dir, \"yolo26n_traffic_best.onnx\")\n",
                 "    shutil.copy(str(item), dest)\n",
-                "    print(f\"✅ Đã copy ONNX: {item.name}\")\n",
+                "    print(f\"✅ Đã copy ONNX: {item.name} -> {dest}\")\n",
+                "\n",
+                "# 3. Copy TensorRT Engine models (nếu có)\n",
+                "for item in Path(\"runs\").rglob(\"*.engine\"):\n",
+                "    dest = os.path.join(output_dir, \"yolo26n_traffic_fp16.engine\")\n",
+                "    shutil.copy(str(item), dest)\n",
+                "    print(f\"✅ Đã copy TensorRT Engine: {item.name} -> {dest}\")\n",
                 "\n",
                 "# 4. Nén kết quả\n",
                 "shutil.make_archive(\"yolo26n_trained_results\", \"zip\", output_dir)\n",

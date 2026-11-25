@@ -120,8 +120,8 @@ class Tracker:
             cost_matrix = matching.compute_cosine_distance(level_tracks, [d.feature for d in level_dets])
             iou_matrix = matching.compute_iou_matrix(level_tracks, level_dets, img_w, img_h)
             
-            # GỌI MAHALANOBIS MỚI TẠO TẠI ĐÂY
-            maha_matrix = matching.compute_mahalanobis_distance(level_tracks, level_dets)
+            # GỌI MAHALANOBIS MỚI TẠO TẠI ĐÂY (Đồng bộ kích thước ảnh đầu vào)
+            maha_matrix = matching.compute_mahalanobis_distance(level_tracks, level_dets, img_w, img_h)
 
             for r, trk in enumerate(level_tracks):
                 for c, det in enumerate(level_dets):
@@ -158,19 +158,17 @@ class Tracker:
             # Chạy thuật toán Hungarian trên ma trận đã được thêm các "chốt chặn"
             matches, un_t, un_d = matching.linear_assignment(cost_matrix, level_tracks, level_dets, 1.0)
 
+            # Lấy danh sách detection thực tế đã ghép trong level này và loại bỏ ngay lập tức
+            matched_det_indices = [unmatched_dets_idx[det_i] for _, det_i in matches]
             for trk_i, det_i in matches:
                 matched_v1.append((level_trk_idx[trk_i], unmatched_dets_idx[det_i]))
+
+            # Ngăn chặn rò rỉ: các level sau sẽ không nhìn thấy detection đã ghép ở level trước
+            unmatched_dets_idx = [d for d in unmatched_dets_idx if d not in matched_det_indices]
 
         for trk_i, det_i in matched_v1:
             self.tracks[trk_i].update(valid_dets[det_i].bbox, valid_dets[det_i].feature, img_w, img_h)
             unmatched_trks_idx.remove(trk_i)
-            # Remove det_i from unmatched_dets_idx. We need to be careful as unmatched_dets_idx is a list of indices relative to valid_dets.
-            # matched_v1 stores the actual indices in self.tracks and valid_dets.
-            # However, the loop structure above makes removing from unmatched_dets_idx tricky if not done carefully.
-            # The original code lacked the removal of det_i from unmatched_dets_idx after loop.
-            # Fixing the logic:
-            if det_i in unmatched_dets_idx:
-                 unmatched_dets_idx.remove(det_i)
 
         # ====================================================================
         # VÒNG 2: IOU MATCHING (Dùng box UKF dự đoán)
@@ -321,7 +319,7 @@ class Tracker:
         for det_idx in unmatched_dets_idx:
             det = valid_dets[det_idx]
             if det.conf > 0.5:
-                new_track = Track(self.fps, self.next_id, det.class_id, det.bbox, det.feature)
+                new_track = Track(self.fps, self.next_id, det.class_id, det.bbox, det.feature, img_size=(img_w, img_h))
                 self.tracks.append(new_track)
                 self.next_id += 1
 

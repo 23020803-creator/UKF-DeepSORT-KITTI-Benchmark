@@ -21,7 +21,7 @@ class Track:
     ngoại hình (ReID features) thông qua Exponential Moving Average (EMA).
     """
 
-    def __init__(self, fps, track_id, class_id, bbox, feature):
+    def __init__(self, fps, track_id, class_id, bbox, feature, img_size=(1920.0, 1080.0)):
         """
         Khởi tạo một đối tượng quỹ đạo mới.
 
@@ -31,11 +31,12 @@ class Track:
             class_id (int): Nhãn phân loại của đối tượng (VD: 0 cho Người, 2 cho Ô tô).
             bbox (numpy.ndarray): Tọa độ hộp bao ban đầu định dạng [x_top_left, y_top_left, width, height].
             feature (numpy.ndarray): Vector đặc trưng nhận dạng (ReID feature) ban đầu.
+            img_size (tuple, optional): Kích thước ảnh đầu vào (width, height). Mặc định là (1920.0, 1080.0).
         """
         self.track_id = track_id
         self.class_id = class_id
 
-        self.ukf = TrackUKF(fps=fps)
+        self.ukf = TrackUKF(fps=fps, img_size=img_size)
         bbox_ukf = self._tlwh_to_xyah(bbox)
         self.ukf.initiate(bbox_ukf)
 
@@ -131,34 +132,24 @@ class Track:
             self.ukf.mean[5] = 0.0
 
         # ==========================================
-        # 4. CẬP NHẬT REID (BẢO VỆ MÉP MÀN HÌNH)
+        # 4. CẬP NHẬT REID (EMA NGOẠI HÌNH)
         # ==========================================
         if detection_feature is not None:
-            # 1. Đưa tất cả vào trong block if để tránh lỗi UnboundLocalError
-            x, y, w, h = detection_bbox
-            margin = 15
-            
-            # Logic khóa không gian: Chống đầu độc EMA (Không cập nhật nếu vật thể chạm lề)
-            is_safe_inside = (x > margin and y > margin and 
-                              x + w < img_w - margin and 
-                              y + h < img_h - margin)
-                              
-            if is_safe_inside:
-                # 2. Chuẩn hóa vector đầu vào (L2 Normalization)
-                det_norm = np.linalg.norm(detection_feature)
-                if det_norm > 1e-6:
-                    detection_feature /= det_norm
-                    
-                if self.smooth_feature is None:
-                    # Dùng .copy() để tránh tham chiếu đè ô nhớ trong Python
-                    self.smooth_feature = detection_feature.copy() 
-                else:
-                    # 3. Cập nhật EMA (Hệ số alpha = 0.9 nghĩa là bảo toàn 90% đặc trưng cũ)
-                    alpha = 0.9 
-                    self.smooth_feature = alpha * self.smooth_feature + (1 - alpha) * detection_feature
-                    
-                    # 4. Chuẩn hóa lại vector EMA sau khi cộng (Dùng max để chống chia cho 0)
-                    self.smooth_feature /= max(np.linalg.norm(self.smooth_feature), 1e-6)
+            # 1. Chuẩn hóa vector đầu vào (L2 Normalization)
+            det_norm = np.linalg.norm(detection_feature)
+            if det_norm > 1e-6:
+                detection_feature /= det_norm
+                
+            if self.smooth_feature is None:
+                # Dùng .copy() để tránh tham chiếu đè ô nhớ trong Python
+                self.smooth_feature = detection_feature.copy() 
+            else:
+                # 2. Cập nhật EMA (Hệ số alpha = 0.9 nghĩa là bảo toàn 90% đặc trưng cũ)
+                alpha = 0.9 
+                self.smooth_feature = alpha * self.smooth_feature + (1 - alpha) * detection_feature
+                
+                # 3. Chuẩn hóa lại vector EMA sau khi cộng (Dùng max để chống chia cho 0)
+                self.smooth_feature /= max(np.linalg.norm(self.smooth_feature), 1e-6)
 
         self.hits += 1
         self.time_since_update = 0

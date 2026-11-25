@@ -64,6 +64,14 @@ def parse_args():
         help="Ngưỡng tự tin (confidence threshold) của YOLO",
     )
     parser.add_argument(
+        "--nms",
+        "--iou",
+        type=float,
+        default=0.70,
+        dest="nms",
+        help="Ngưỡng NMS IoU của YOLO (mặc định 0.70 = 70%)",
+    )
+    parser.add_argument(
         "--output",
         type=str,
         default="outputs/videos/tracking_result.mp4",
@@ -87,6 +95,12 @@ def parse_args():
         default=1.0,
         help="Tỉ lệ thu nhỏ khung hình đầu vào (ví dụ 0.5 để tăng tốc)",
     )
+    parser.add_argument(
+        "--save-frames",
+        type=str,
+        default="",
+        help="Đường dẫn thư mục lưu chuỗi ảnh kết quả (.jpg) sau khi tracking",
+    )
     return parser.parse_args()
 
 
@@ -100,6 +114,8 @@ def resolve_input_source(input_arg):
         if p.is_file():
             return str(p), "video"
         if p.is_dir():
+            if (p / "images").is_dir():
+                return str(p / "images"), "dir"
             return str(p), "dir"
 
     # Tự động dò tìm các file video có sẵn trong project
@@ -197,9 +213,12 @@ def main():
     print("🚀 KHỞI ĐỘNG HỆ THỐNG AUTONOMOUS TRAFFIC TRACKER (LAPTOP PIPELINE)")
     print("=" * 80)
     print(f"[CẤU HÌNH] Nguồn video/camera : {input_src} ({src_type})")
-    print(f"[CẤU HÌNH] YOLO Detector       : {args.weights} (conf={args.conf})")
+    print(f"[CẤU HÌNH] YOLO Detector       : {args.weights} (conf={args.conf}, nms={args.nms})")
     print(f"[CẤU HÌNH] ReID Extractor     : {reid_path}")
     print(f"[CẤU HÌNH] Lưu video kết quả  : {args.output}")
+    if args.save_frames:
+        os.makedirs(args.save_frames, exist_ok=True)
+        print(f"[CẤU HÌNH] Lưu ảnh từng frame   : {args.save_frames}")
     print(f"[CẤU HÌNH] Giới hạn số frame  : {args.max_frames if args.max_frames > 0 else 'Toàn bộ'}")
     print("=" * 80)
 
@@ -212,7 +231,7 @@ def main():
 
     # 3. Khởi tạo các module mô hình AI
     print("\n[1/4] Nạp mô hình phát hiện đối tượng YOLO...")
-    detector = YOLODetector(model_path=args.weights, conf_thresh=args.conf)
+    detector = YOLODetector(model_path=args.weights, conf_thresh=args.conf, nms_thresh=args.nms)
 
     print("\n[2/4] Nạp mô hình trích xuất đặc trưng ngoại hình ReID...")
     reid = ReIDExtractor(model_path=reid_path, device="CPU")
@@ -287,6 +306,10 @@ def main():
             drawn_img = visualizer.draw_tracks(image, draw_data, frame_idx)
             draw_ms = (time.time() - t_draw) * 1000
 
+            if args.save_frames:
+                frame_out_path = os.path.join(args.save_frames, f"frame_{frame_idx:06d}.jpg")
+                cv2.imwrite(frame_out_path, drawn_img)
+
             frame_elapsed = time.time() - frame_start
             cur_fps = 1.0 / max(1e-4, frame_elapsed)
 
@@ -321,6 +344,8 @@ def main():
     print(f"⏱️ Tổng thời gian thực thi : {total_elapsed:.2f} giây")
     print(f"🚀 Tốc độ trung bình       : {avg_fps:.2f} FPS")
     print(f"🎥 Video kết quả đã lưu tại: {args.output}")
+    if args.save_frames:
+        print(f"🖼️ Chuỗi ảnh đã lưu tại    : {args.save_frames}")
     print("=" * 80)
 
 
